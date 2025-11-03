@@ -1,196 +1,236 @@
-local M = {}
+local bit = require("bit")
 local config = require("referencer.config")
+local BufferLspWatcher = require("referencer.buffer-watcher")
 local utils = require("referencer.utils")
-local virtual_lines_mode = require("referencer.virtual-lines-mode")
-local inline_mode = require("referencer.inline-mode")
+local virtual_lines_mode = require("referencer.adorners.virtual-lines-adorner")
+local inline_mode = require("referencer.adorners.inline-adorner")
 
 local ns = vim.api.nvim_create_namespace("Referencer")
 local group = vim.api.nvim_create_augroup("Referencer", { clear = true })
 
-M.enable = false
 
-local option_show_no_reference = false
-local option_kinds = {}
-local current_mode = nil
+---@class Referencer
+local M = {}
+-- M.enable = false
 
-local lsp_clients = {}
-local function is_request_valid(bufnr, cancelled, start_changedtick)
-    return not cancelled
-        and vim.api.nvim_buf_is_valid(bufnr)
-        and vim.api.nvim_buf_get_changedtick(bufnr) == start_changedtick
+---@type ReferencerConfig
+local opts = nil
+local kinds_mask = 0
+
+---@param  adorner_opts SymbolAdornerOpions
+local function create_adorner(symbol_watcher, adorner_opts)
+    local current_mode = nil
+    if adorner_opts.type == "virtual_line" then
+        print("virtual-lines-mode enabledt")
+        current_mode = virtual_lines_mode:new(symbol_watcher)
+    else
+        print("inline_mode enabledt")
+        current_mode = inline_mode:new(symbol_watcher)
+    end
+    -- current_mode:init(user_opts, ns)
+    return current_mode
 end
 
-function M.get_current_mode()
-   return current_mode
+---@type table<integer,BufferLspWatcher>
+local watcher_per_buffer = {}
+
+---@return SymbolsWatcher SymbolsWatcher
+function M.get_current_symbols_watcher_for_buffer(buffer)
+    local watcher = watcher_per_buffer[buffer]
+    if watcher then
+        return watcher.symbols_watcher
+    end
 end
 
----@param client vim.lsp.Client
-local function actualize_from_lsp(client, bufnr)
-    local start_changedtick = vim.api.nvim_buf_get_changedtick(bufnr)
-
-    -- Cancel any existing request
-    if M.pending_requests[bufnr] and M.pending_requests[bufnr].cancel_fn then
-        M.pending_requests[bufnr].cancel_fn()
-    end
-
-    -- recreate the pending request entry
-    M.pending_requests[bufnr] = {}
-
-    local request_ids = {}
-    local cancelled = false
-    local pending_refs = 0  -- Track pending reference requests
-
-    local actualization_ctx = nil
-    local cancel_fn = function()
-        cancelled = true
-        for _, req_id in ipairs(request_ids) do
-            client:cancel_request(req_id)
-        end
-        M.pending_requests[bufnr] = nil
-        if actualization_ctx then
-            current_mode.actualization_cancelled(actualization_ctx, bufnr)
-        end
-    end
-
-    M.pending_requests[bufnr].cancel_fn = cancel_fn
-
-    -- Function to check if all requests are done
-    local function check_completion()
-        if pending_refs == 0 and not cancelled then
-            -- vim.schedule(function()
-                if not cancelled then
-                    M.pending_requests[bufnr] = nil
-                    vim.schedule(function ()
-                    current_mode.actualization_end(actualization_ctx, bufnr)
-                    end)
-                end
-            -- end)
-        end
-    end
-
-    local success, req_id = client:request("textDocument/documentSymbol", {
-        textDocument = vim.lsp.util.make_text_document_params(bufnr),
-    }, function(_, result, _, _)
-            if cancelled then return end
-
-            if not vim.api.nvim_buf_is_valid(bufnr) or
-                vim.api.nvim_buf_get_changedtick(bufnr) ~= start_changedtick then
-                cancel_fn()
-                return
+---@return integer
+local function to_lsp_symbol_kinds_mask(symbol_kinds)
+    local result = 0
+    local function parse_value(value)
+        if type(value) == "string" then
+            local symbol_kind_lsp = vim.lsp.protocol.SymbolKind[value]
+            if not symbol_kind_lsp then
+                -- Warn about invalid option
+                vim.notify(
+                    string.format("Invalid option '%s' for type is doesn't exists is Lsp", value),
+                    vim.log.levels.WARN
+                )
+                goto continue
             end
-
-            if not result then
-                M.pending_requests[bufnr] = nil
-                return
+            -- print("Type:" .. value .. "lsp:" .. symbol_kind_lsp)
+            value = symbol_kind_lsp
+        else
+            if type(value) ~= "number" then
+                -- Warn about invalid option
+                vim.notify(
+                    string.format("Invalid option '%s' for type. It should be string or number", value),
+                    vim.log.levels.WARN
+                )
+                goto continue
             end
+        end
+        -- print("type:" .. type(name))
+        result = bit.bor(result, bit.lshift(1, value - 1))
+        --TODO check if value is valid
+        -- print(name .. " " ..  bit.lshift(1, name - 1))
+        ::continue::
 
-            actualization_ctx = current_mode.actualization_start(bufnr)
 
-            local params = {
-                textDocument = vim.lsp.util.make_text_document_params(bufnr),
-                position = nil,
-                context = { includeDeclaration = true },
-            }
 
-            local function process(symbols)
-                for _, sym in ipairs(symbols) do
-                    if vim.tbl_contains(option_kinds, sym.kind) then
-                        local pos = sym.selectionRange.start
-                        local line = pos.line
-                        local col = pos.character
+    end
+    utils.iter_parts(symbol_kinds, function (i,v)
+        parse_value(v)
+    end,function (k,v)
+            parse_value(k)
+        end)
+    return result
+end
 
-                        params.position = pos
 
-                        pending_refs = pending_refs + 1
+---@param watcher BufferLspWatcher
+----@param adorner SymbolAdorner
+local function resolve_options(options, watcher)
+    local global_adorner_opts = options.adorner
 
-                        local ref_success, ref_req_id = client:request("textDocument/references", params, function(_, refs)
-                            if cancelled then 
-                                pending_refs = pending_refs - 1
-                                return 
-                            end
+    local function is_empty(tbl)
+        return next(tbl) == nil
+    end
 
-                            -- Quick validation check
-                            if not is_request_valid(bufnr, false, start_changedtick) then
-                                pending_refs = pending_refs - 1
-                                cancel_fn()
-                                return
-                            end
+    local function resolve_adorner(value, default_option)
+        if type(value) == "boolean" then return value end
+        if type(value) == "string" then
+            local ad = options.adorners[value]
+            if ad then
+                return ad
+            end
+            -- Warn about invalid option, fallback to default
+            vim.notify(
+                string.format("Invalid option '%s', using '%s'", value, default_option),
+                vim.log.levels.WARN
+            )
+        end
 
-                            -- Only proceed if we have valid refs
-                            if not refs then
-                                pending_refs = pending_refs - 1
-                                check_completion()
-                                return
-                            end
-                            -- Calculate reference count
-                            local refsCount = (refs and #refs > 0) and (#refs - 1) or 0
-                            --
-                            -- -- Should we show this mark?
-                            -- if not option_show_no_reference and refsCount == 0 then
-                            --     vim.schedule(function()
-                            --         if is_request_valid(bufnr, cancelled, start_changedtick) then
-                            --             current_mode.remove_virtual_text(bufnr, line, col)
-                            --         end
-                            --     end)
-                            --     pending_refs = pending_refs - 1
-                            --     check_completion()
-                            --     return
-                            -- end
+        if is_empty(value) then
+            return default_option
+        end
 
-                            -- Show the reference count
-                            local symbol_data = {
-                                refs = refs,
-                                sym = sym
-                            }
+        return value
+    end
 
-                            current_mode.set_virtual_text(actualization_ctx, bufnr, line, col, symbol_data)
+    local default_option = vim.deepcopy(global_adorner_opts)
+    local adorners_opts = {}
 
-                            pending_refs = pending_refs - 1
-                            check_completion()  -- Check if this was the last one
-                        end, bufnr)
-
-                        if ref_success and ref_req_id then
-                            table.insert(request_ids, ref_req_id)
-                        else
-                            -- Request failed to start, decrement counter
-                            pending_refs = pending_refs - 1
-                        end
+    local function resolve_options_for_kinds(kinds)
+        if kinds then
+            for kind, value in pairs(kinds) do
+                local kind_adorner_opts = resolve_adorner(value, default_option)
+                if kind_adorner_opts ~= false then
+                    local kinds_ad_options = adorners_opts[kind_adorner_opts]
+                    if not kinds_ad_options then
+                        kinds_ad_options = {kinds = {}}
+                        adorners_opts[kind_adorner_opts] = kinds_ad_options
                     end
-                    if sym.children then
-                        process(sym.children)
-                    end
+                    table.insert(kinds_ad_options.kinds, kind)
+                    -- print(string.format("adorner: %s insert type: %s", kind_adorner_opts.type, kind))
                 end
             end
+        end
+    end
 
-            process(result)
 
-            -- Check if there were no reference requests at all (or all completed synchronously)
-            check_completion()
-        end, bufnr)
+    local kind_options = options.kinds
 
-    -- Track the initial request ID
-    if success and req_id then
-        table.insert(request_ids, req_id)
+    if options.filetype then
+        local ft = vim.api.nvim_get_option_value("filetype", {buf = watcher.buffer_id})
+        local options_for_filetype = options.filetype[ft]
+        if options_for_filetype then
+            if options_for_filetype.adorner then
+                default_option = resolve_adorner(options_for_filetype.adorner, default_option)
+            end
+            if options_for_filetype.kinds then
+                kind_options = vim.tbl_extend("force", kind_options, options_for_filetype.kinds)
+                -- print("filetype:" .. vim.inspect(kind_options))
+            end
+        else
+
+        end
+    end
+
+    if kind_options then
+        resolve_options_for_kinds(kind_options)
+    end
+
+    for ad_opts, kind_opts in pairs(adorners_opts) do
+        local opts_copy = vim.deepcopy(ad_opts)
+        -- print(string.format("kind_opts.kinds: %s", vim.inspect(kind_opts.kinds)))
+        print("adorner:" .. opts_copy.type .. "parsing for kinds:" .. vim.inspect(kind_opts.kinds))
+        -- key is options, setting kinds to filter
+        local adorner_for_kinds = create_adorner(watcher.symbols_watcher, opts_copy)
+        local kind_mask = to_lsp_symbol_kinds_mask(kind_opts.kinds)
+        watcher:add_adorner(adorner_for_kinds, opts_copy, kind_mask)
+        -- print(string.format("options resolved: %s", vim.inspect(opts_copy)))
     end
 end
 
-local function actualize_all_lsps(bufnr)
-    for _, client in ipairs(lsp_clients) do
-        actualize_from_lsp(client, bufnr)
+local function get_or_create_watcher_and_adorners(buffer)
+    ---@type BufferLspWatcher
+    local watcher = watcher_per_buffer[buffer]
+    if watcher then return watcher end
+
+    -- watcher:add_adorner(create_adorner(watcher.symbols_watcher, opts), opts)
+
+    watcher = BufferLspWatcher.new(buffer, ns, opts, kinds_mask)
+    watcher_per_buffer[buffer] = watcher
+    resolve_options(opts, watcher)
+
+    --call updates only for specific buffer
+    local debounced_update = utils.debounce(function()
+        watcher:actualize_all_lsps(false)
+    end, opts.update_debounce_time)
+
+    if opts.auto_update == "change" then
+        vim.api.nvim_create_autocmd({ "TextChanged", "TextChangedI" }, {
+            group = group,
+            buffer = buffer,  -- Specific to this buffer
+            callback = function (e)
+                --when we want to react fast on changes, doing some minimal job
+                --fe. whew we join lines with two virt_lines  above our new line there will be two lines,
+                --until real aclualiation kicks in debounced_update
+                --in order to prevent it we just eraze one line immidiatelly, so it looks less messy
+                watcher:actualize_all_lsps(true)
+
+                debounced_update()
+            end
+        })
     end
+
+    if opts.auto_update == "save" then
+        vim.api.nvim_create_autocmd("BufWritePost", {
+            group = group,
+            buffer = buffer,
+            callback = function(e)
+                watcher:actualize_all_lsps(false)
+            end,
+        })
+    end
+
+    -- Clean up mark state when buffers are deleted
+    vim.api.nvim_create_autocmd("BufDelete", {
+        group = group,
+        buffer = buffer,
+        callback = function(e)
+            watcher:destroy()
+        end
+    })
+
+    return watcher
 end
 
-function M.delete_all()
-    M.enable = false
-    local bufnr = vim.api.nvim_get_current_buf()
-
-    -- Clear using both modes to be safe
-    virtual_lines_mode.clear_buffer(bufnr, ns)
-    inline_mode.clear_buffer(bufnr, ns)
-end
-
-local function enable()
+local enabled = false
+function M.enable()
+    if enabled then return end
+    enabled = true
     local options = config.options
+
     vim.api.nvim_create_autocmd("LspAttach", {
         pattern = options.pattern,
         group = group,
@@ -201,83 +241,48 @@ local function enable()
             local client = vim.lsp.get_client_by_id(ev.data.client_id)
             if not client or not utils.is_client_supported(client, config) then return end
 
-            table.insert(lsp_clients, client)
-            current_mode.init_buffer(buffer)
-            actualize_from_lsp(client, buffer)
-
-            --call updates only for specific buffer
-            local debounced_update = utils.debounce(function()
-                actualize_from_lsp(client, buffer)
-            end, options.update_debounce_time)
-            if options.auto_update == "change" then
-
-                vim.api.nvim_create_autocmd({ "TextChanged", "TextChangedI" }, {
-                    group = group,
-                    buffer = buffer,  -- Specific to this buffer
-                    callback = debounced_update,
-                })
-            end
-
-            if options.auto_update == "save" then
-                vim.api.nvim_create_autocmd("BufWritePost", {
-                    group = group,
-                    callback = function(e)
-                        actualize_all_lsps(e.buf)
-                    end,
-                })
-            end
-
-            -- Clean up mark state when buffers are deleted
-            vim.api.nvim_create_autocmd("BufDelete", {
-                group = group,
-                callback = function(e)
-                    current_mode.clear_buffer(e.buf)
-                end
-            })
-            if config.options.mode == "virtual_line" then
-                -- Update virtual lines on horizontal scroll to make them scroll with text
-                vim.api.nvim_create_autocmd("WinScrolled", {
-                    callback = function()
-                        if not M.enable then return end
-                        local bufnr = vim.api.nvim_get_current_buf()
-
-                        -- Only update virtual lines mode
-                        virtual_lines_mode.update_on_scroll(bufnr, ns)
-                    end
-                })
-            else
-            end
+            local watcher = get_or_create_watcher_and_adorners(buffer)
+            watcher:add_client(client)
         end,
     })
 
     vim.api.nvim_create_autocmd("LspDetach", {
+        pattern = options.pattern,
+        group = group,
         callback = function(ev)
             local client = vim.lsp.get_client_by_id(ev.data.client_id)
             if not client or not utils.is_client_supported(client, config) then return end
-            lsp_clients = vim.iter(lsp_clients)
-                :filter(function(c) return c ~= client end)
-                :totable()
+            local watcher = watcher_per_buffer[ev.buf]
+            if not watcher then return end
+
+            watcher:remove_client(client)
+
             -- Clear client cache when LSP detaches
             utils.clear_client_cache()
         end,
     })
 end
 
-local function disable()
-    M.enable = false
-    M.delete_all()
+
+function M.disable()
+    if enabled == false then
+        return
+    end
+    for _, watcher in ipairs(watcher_per_buffer) do
+        watcher:destroy()
+    end
+    watcher_per_buffer = {}
+
+    vim.api.nvim_clear_autocmds({ group = group })
+
+    enabled = false
 end
 
 function M.toggle()
-    if M.enable then
-        disable()
+    if enabled then
+        M.disable()
     else
-        enable()
-        local bufnr = vim.api.nvim_get_current_buf()
-        local clients = vim.lsp.get_clients({ bufnr = bufnr })
-        for _, v in ipairs(clients) do
-            M.actualize_from_lsp(v, bufnr)
-        end
+        M.enable()
     end
 end
 
@@ -292,36 +297,18 @@ function M.update()
     end
 end
 
+
+---@param user_opts ReferencerConfig
 function M.setup(user_opts)
+    -- require("referencer.benhcmark")
     utils.clear_client_cache()
     config.setup(user_opts)
-
-    M.pending_requests = M.pending_requests or {}
-    option_show_no_reference = config.options.show_no_reference
-    option_kinds = config.options.kinds
-
-    if user_opts.mode == "virtual_line" then
-        current_mode = virtual_lines_mode
-        -- actualization_start = virtual_lines_mode.a
-        -- Update virtual lines on horizontal scroll to make them scroll with text
-        vim.api.nvim_create_autocmd("WinScrolled", {
-            callback = function()
-                if not M.enable then return end
-                local bufnr = vim.api.nvim_get_current_buf()
-                -- Only update virtual lines mode
-                virtual_lines_mode.update_on_scroll(bufnr, ns)
-            end
-        })
-    else
-        current_mode = inline_mode
-    end
-
-    current_mode.init(user_opts, ns)
-
+    opts = config.options
+    kinds_mask = to_lsp_symbol_kinds_mask(opts.kinds or {})
     vim.api.nvim_create_user_command("ReferencerToggle", M.toggle, {})
     vim.api.nvim_create_user_command("ReferencerUpdate", M.update, {})
 
-    if (user_opts.enable) then
+    if (opts.enable) then
         M.toggle()
     end
 end
