@@ -1,5 +1,6 @@
 local bit = require("bit")
 local config = require("referencer.config")
+local utils = require("referencer.utils")
 local SymbolsWatcher = require("referencer.symbols-watcher.symbols-watcher")
 
 ---@class BufferLspWatcher
@@ -68,6 +69,19 @@ function BufferLspWatcher:remove_client(client)
 end
 
 ---@param client vim.lsp.Client
+function BufferLspWatcher:test_query(client, line, col)
+    -- Correct way (what vim.lsp.buf.references() does internally)
+    local params = vim.lsp.util.make_position_params()
+    params.context = { includeDeclaration = true }
+
+    client:request("textDocument/references", params, function(_, refs)
+        print("Got", #refs, "references")
+    end)
+
+
+end
+
+---@param client vim.lsp.Client
 function BufferLspWatcher:actualize_from_client(client, start_changedtick, cancelled_ref, request_ids, on_complete)
     local bufnr = self.buffer_id
     local pending_refs = 0  -- Track reference requests for THIS client
@@ -100,12 +114,12 @@ function BufferLspWatcher:actualize_from_client(client, start_changedtick, cance
                 return
             end
 
-            -- Process symbols and make reference requests
-            local params = {
-                textDocument = vim.lsp.util.make_text_document_params(bufnr),
-                position = nil,
-                context = { includeDeclaration = true },
-            }
+            -- -- Process symbols and make reference requests
+            -- local params = {
+            --     textDocument = vim.lsp.util.make_text_document_params(bufnr),
+            --     position = nil,
+            --     context = { includeDeclaration = true },
+            -- }
 
             ---@param symbols lsp.DocumentSymbol[]
             local function process(symbols)
@@ -115,8 +129,24 @@ function BufferLspWatcher:actualize_from_client(client, start_changedtick, cance
 
                         pending_refs = pending_refs + 1
 
-                        local pos = sym.selectionRange.start
-                        params.position = pos
+                        -- local pos = sym.selectionRange.start
+                        -- params.position = pos
+
+                        -- local params = {
+                        --     textDocument = vim.lsp.util.make_text_document_params(bufnr),
+                        --     position = sym.selectionRange.start,  -- Direct assignment
+                        --     context = { includeDeclaration = true },
+                        -- }
+                        local pos = {
+                            line = sym.selectionRange["end"].line,
+                            character = sym.selectionRange["end"].character - 1,  -- Last char of symbol
+                        }
+
+                        local params = {
+                            textDocument = vim.lsp.util.make_text_document_params(bufnr),
+                            position = pos,
+                            context = { includeDeclaration = true },
+                        }
                         local ref_success, ref_req_id = client:request("textDocument/references", params, function(_, refs)
                             if cancelled_ref[1] then
                                 pending_refs = pending_refs - 1
@@ -231,6 +261,14 @@ function BufferLspWatcher:actualize_all_lsps(dry_run)
             pending_clients = pending_clients - 1
             check_all_completion()
         end)
+    end
+end
+
+---@param line integer
+---@param col integer
+function BufferLspWatcher:inspect_position(line, col)
+    for i, adorner in ipairs(self.adorners) do
+        adorner:inspect_position(line, col)
     end
 end
 

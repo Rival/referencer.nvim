@@ -57,9 +57,9 @@ end
 function M.flash(bufnr, line, col, end_col, duration, color_index)
     duration = duration or 150
     local hl_group = color_index and M.get_color(color_index) or M.get_next_color()
-    
+
     vim.highlight.range(bufnr, flash_ns, hl_group, {line, col}, {line, end_col})
-    
+
     vim.defer_fn(function()
         vim.api.nvim_buf_clear_namespace(bufnr, flash_ns, line, line + 1)
     end, duration)
@@ -75,21 +75,21 @@ end
 function M.debug_mark(bufnr, line, col, end_col, opts)
     opts = opts or {}
     local hl_group = opts.color_index and M.get_color(opts.color_index) or M.get_next_color()
-    
+
     local mark_opts = {
         end_col = end_col,
         hl_group = hl_group,
         hl_mode = "combine",
     }
-    
+
     -- Add virtual text if provided
     if opts.text then
         mark_opts.virt_text = {{" " .. opts.text, "Comment"}}
         mark_opts.virt_text_pos = "eol"
     end
-    
+
     local mark_id = vim.api.nvim_buf_set_extmark(bufnr, debug_ns, line, col, mark_opts)
-    
+
     -- Store for tracking
     table.insert(debug_marks, {
         bufnr = bufnr,
@@ -99,7 +99,7 @@ function M.debug_mark(bufnr, line, col, end_col, opts)
         end_col = end_col,
         text = opts.text,
     })
-    
+
     return mark_id
 end
 
@@ -108,7 +108,7 @@ end
 ---@param mark_id number
 function M.remove_debug_mark(bufnr, mark_id)
     pcall(vim.api.nvim_buf_del_extmark, bufnr, debug_ns, mark_id)
-    
+
     -- Remove from tracking
     for i, mark in ipairs(debug_marks) do
         if mark.bufnr == bufnr and mark.mark_id == mark_id then
@@ -142,16 +142,16 @@ end
 ---@return boolean new_state
 function M.toggle_debug_mode()
     debug_mode = not debug_mode
-    
+
     if not debug_mode then
         M.clear_debug_marks()
     end
-    
+
     vim.notify(
         string.format("Debug marks: %s", debug_mode and "ON" or "OFF"),
         vim.log.levels.INFO
     )
-    
+
     return debug_mode
 end
 
@@ -179,12 +179,12 @@ function M.inspect_marks_at(bufnr, line, col)
         {line, col},
         {details = true}
     )
-    
+
     if #marks == 0 then
         vim.notify("No debug marks at this position", vim.log.levels.INFO)
         return
     end
-    
+
     for _, mark in ipairs(marks) do
         local id, row, col_start, details = mark[1], mark[2], mark[3], mark[4]
         local text = ""
@@ -206,7 +206,7 @@ end
 ---@param opts? {duration?: number, color_index?: number, text?: string}
 function M.mark(bufnr, line, col, end_col, opts)
     opts = opts or {}
-    
+
     if debug_mode then
         return M.debug_mark(bufnr, line, col, end_col, opts)
     else

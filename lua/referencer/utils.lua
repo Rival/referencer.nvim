@@ -167,6 +167,37 @@ function M.iter_parts(tbl, array_fn, hash_fn)
     end
 end
 
+function M.show_hover_at(text_lines, row, col)
+  local bufnr = vim.api.nvim_create_buf(false, true)
+
+  vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, text_lines)
+  vim.api.nvim_set_option_value('modifiable', false, { buf = bufnr })
+
+  local win_id = vim.api.nvim_open_win(bufnr, false, {
+    relative = 'editor',  -- Position relative to editor (not cursor)
+    row = row,            -- Row (0 = top of editor)
+    col = col,            -- Column (0 = left edge of editor)
+    width = math.max(unpack(vim.tbl_map(function(line) return #line end, text_lines))),
+    height = #text_lines,
+    style = 'minimal',
+    border = 'rounded',
+    noautocmd = true,
+  })
+
+  -- Auto-close on cursor move
+  vim.api.nvim_create_autocmd({ "CursorMoved", "InsertEnter" }, {
+    buffer = vim.api.nvim_get_current_buf(),
+    once = true,
+    callback = function()
+      if vim.api.nvim_win_is_valid(win_id) then
+        vim.api.nvim_win_close(win_id, true)
+      end
+    end,
+  })
+
+  return win_id
+end
+
 ---Flash area with extmark
 ---@param bufnr number
 ---@param line number 0-indexed
@@ -175,7 +206,7 @@ end
 ---@param opts? {duration: number, hl_group: string}
 function M.flash_extmark(bufnr, line, start_col, end_col, opts)
     opts = opts or {}
-    local duration = opts.duration or 150
+    local duration = opts.duration or 750
     local hl_group = opts.hl_group or "IncSearch"
 
     local ns = vim.api.nvim_create_namespace("flash_extmark")

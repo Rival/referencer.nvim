@@ -30,6 +30,12 @@ function SymbolAdorner:init(opts, index, kind_mask)
     print("inited-with index:" .. index)
 end
 
+---@param line integer
+---@param col integer
+function SymbolAdorner:inspect_position(line, col)
+
+end
+
 function SymbolAdorner:is_type_supported(kind)
     return bit.band(kind, self.kinds_mask) ~= 0
 end

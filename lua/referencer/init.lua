@@ -18,6 +18,7 @@ local opts = nil
 local kinds_mask = 0
 
 ---@param  adorner_opts SymbolAdornerOpions
+---@return SymbolAdorner
 local function create_adorner(symbol_watcher, adorner_opts)
     local current_mode = nil
     if adorner_opts.type == "virtual_line" then
@@ -34,9 +35,17 @@ end
 ---@type table<integer,BufferLspWatcher>
 local watcher_per_buffer = {}
 
----@return SymbolsWatcher SymbolsWatcher
-function M.get_current_symbols_watcher_for_buffer(buffer)
+---@return BufferLspWatcher
+function M.get_LspWatcher(buffer)
     local watcher = watcher_per_buffer[buffer]
+    if watcher then
+        return watcher
+    end
+end
+
+---@return SymbolsWatcher
+function M.get_SymbolsWatcher(buffer)
+    local watcher = M.get_LspWatcher(buffer)
     if watcher then
         return watcher.symbols_watcher
     end

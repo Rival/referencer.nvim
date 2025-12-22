@@ -102,10 +102,6 @@ local function update_visual_ext_mark(adorner, watcher, symbol)
         col = SymbolsWatcher.get_symbol_end_col(symbol)
     end
 
-    if mark_core.line == 9 and mark_core.col == 16 then
-        print("htnh")
-    end
-
     local visual_mark_id = adorner_data.visual_mark_id
     if not visual_mark_id then
         -- visual mark is not created yet
@@ -136,10 +132,12 @@ local function update_visual_ext_mark(adorner, watcher, symbol)
 
         if ok then
             adorner_data.visual_mark_id = id
+            if watcher.is_debug_visual then
             print(string.format("Symbol:%s visual mark changed:%s value %d",
                 SymbolInfo.id_pos_to_string(symbol),
                 id,
                 adorner_data.visual_mark_id))
+            end
         else
             print("INLINE_ADORNER: Error creating visual mark:" .. SymbolInfo.pos_to_string(symbol) .. vim.inspect(symbol))
 
@@ -178,6 +176,40 @@ function InlineAdorner:init(opts, index, kinds_mask)
     self:Enable()
 end
 
+---@param  mark SymbolInfo
+function InlineAdorner:destroy_mark(mark)
+    local adorner_data = SymbolInfo.get_adorner_data(mark, self)
+    local visual_mark_id = adorner_data.visual_mark_id
+    if visual_mark_id then
+        -- visual mark is created yet
+        local ok = pcall(vim.api.nvim_buf_del_extmark, self.watcher.buffer, self.watcher.namespace, visual_mark_id)
+        if ok then
+            if self.watcher.is_debug_visual then
+                print(string.format("visual mark destroyed: %s mark_id:%d", SymbolInfo.pos_to_string(mark), visual_mark_id))
+            end
+        end
+        adorner_data.visual_mark_id = nil
+    end
+end
+
+---@param line integer
+---@param col integer
+function SymbolAdorner:inspect_position(line, col)
+    local line_info = self.watcher.lines[line]
+    if line_info then
+        for i, symbol_info in ipairs(line_info.symbols) do
+            local s_col = SymbolInfo.get_col(symbol_info)
+            local s_end_col = SymbolInfo.get_end_col(symbol_info)
+            if col >= s_col and col <= s_end_col then
+                utils.flash_extmark(self.watcher.buffer, line, s_col, s_end_col)
+                local text = vim.inspect(SymbolInfo.get_symbol_data(symbol_info))
+                local lines = vim.split(text, '\n')
+                utils.show_hover_at(lines, line + 3, s_end_col + 2)
+            end
+        end
+    end
+end
+
 function InlineAdorner:Enable()
     -- self.watcher.OnLineCreated:subscribe(function (args)
     -- end)
@@ -189,18 +221,16 @@ function InlineAdorner:Enable()
             update_visual_ext_mark(self, self.watcher, args.symbol)
         end
     end))
+
+    self:AddUnsubHook(self.watcher.OnActualizeCancelled:subscribe(function ()
+        for i, mark in pairs(self.watcher.new_symbols) do
+            self:destroy_mark(mark)
+        end
+    end))
+
     ---@param args SymbolInfo
     self:AddUnsubHook(self.watcher.OnSymbolMarkDestroyed:subscribe(function (args)
-        local adorner_data = SymbolInfo.get_adorner_data(args, self)
-        local visual_mark_id = adorner_data.visual_mark_id
-        if visual_mark_id then
-            -- visual mark is created yet
-            local ok = pcall(vim.api.nvim_buf_del_extmark, self.watcher.buffer, self.watcher.namespace, visual_mark_id)
-            if ok then
-                print(string.format("visual mark destroyed: %s mark_id:%d", SymbolInfo.pos_to_string(args), visual_mark_id))
-            end
-            adorner_data.visual_mark_id = nil
-        end
+            self:destroy_mark(args)
     end))
 
     -- self.watcher.OnActualizeEnd:subscribe(function (args)

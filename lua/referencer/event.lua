@@ -24,12 +24,12 @@ end
 function Event:subscribe(handler)
   local id = self.next_id
   self.next_id = self.next_id + 1
-  
+
   table.insert(self.subscriptions, {
     id = id,
     callback = handler
   })
-  
+
   -- Closure captures the ID
   return function()
     self:unsubscribe_by_id(id)
