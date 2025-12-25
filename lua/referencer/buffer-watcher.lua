@@ -2,6 +2,7 @@ local bit = require("bit")
 local config = require("referencer.config")
 local utils = require("referencer.utils")
 local SymbolsWatcher = require("referencer.symbols-watcher.symbols-watcher")
+local logger = require("referencer.logger").for_module("buffer_watcher")
 
 ---@class BufferLspWatcher
 ---@field line_states table<number, table>
@@ -20,7 +21,7 @@ BufferLspWatcher.__index = BufferLspWatcher
 ---@param kinds_mask integer
 ---@return BufferLspWatcher watcher
 function BufferLspWatcher.new(buffer, ns, opts, kinds_mask)
-    print("Watcher created:" .. vim.inspect(kinds_mask))
+    logger.debug("Watcher created for buffer %d: mask=%d", buffer, kinds_mask)
     return setmetatable({
         -- These are INSTANCE fields (unique per object)
         line_states = {},
@@ -48,7 +49,7 @@ end
 function BufferLspWatcher:add_adorner(adorner, opts, kinds_mask)
     table.insert(self.adorners, adorner)
     adorner:init(opts, #self.adorners, kinds_mask)
-    print("adorner added:" .. vim.inspect(opts) .. "mask:" .. kinds_mask)
+    logger.info("Adorner added: opts=%s mask=%d", vim.inspect(opts), kinds_mask)
 end
 
 function BufferLspWatcher:add_client(client)
@@ -75,7 +76,7 @@ function BufferLspWatcher:test_query(client, line, col)
     params.context = { includeDeclaration = true }
 
     client:request("textDocument/references", params, function(_, refs)
-        print("Got", #refs, "references")
+        logger.debug("Test query got %d references", #refs)
     end)
 
 
@@ -124,19 +125,15 @@ function BufferLspWatcher:actualize_from_client(client, start_changedtick, cance
             ---@param symbols lsp.DocumentSymbol[]
             local function process(symbols)
                 for _, sym in ipairs(symbols) do
-                    local kind_bit = bit.lshift(1, sym.kind - 1) --- also will be usefull to check this later in adorners, -1 because we start at File = 1  
-                    if bit.band(kind_bit, self.kinds_mask) ~= 0 then
+                    local kind_bit = bit.lshift(1, sym.kind - 1) --- also will be usefull to check this later in adorners, -1 because we start at File = 1
 
+                    -- LSP Defense: Different servers populate symbol positions inconsistently.
+                    -- Some provide selectionRange (identifier location), some only range (full extent),
+                    -- some provide neither for certain symbol types. Filter early to avoid nil access.
+                    -- Only process symbols that match our kind mask AND have selectionRange
+                    if bit.band(kind_bit, self.kinds_mask) ~= 0 and sym.selectionRange then
                         pending_refs = pending_refs + 1
 
-                        -- local pos = sym.selectionRange.start
-                        -- params.position = pos
-
-                        -- local params = {
-                        --     textDocument = vim.lsp.util.make_text_document_params(bufnr),
-                        --     position = sym.selectionRange.start,  -- Direct assignment
-                        --     context = { includeDeclaration = true },
-                        -- }
                         local pos = {
                             line = sym.selectionRange["end"].line,
                             character = sym.selectionRange["end"].character - 1,  -- Last char of symbol
@@ -206,16 +203,23 @@ end
 
 function BufferLspWatcher:actualize_all_lsps(dry_run)
     if dry_run then
-        print("===Dry run start")
+        logger.debug("=== Dry run start ===")
         self.symbols_watcher:actualize_buffer_change()
-        print("===Dry run end")
+        logger.debug("=== Dry run end ===")
         return  -- Don't start LSP requests
     end
 
     local bufnr = self.buffer_id
     local start_changedtick = vim.api.nvim_buf_get_changedtick(bufnr)
 
-    -- Cancel existing
+    -- Skip if buffer hasn't changed since last update (prevents duplicate requests)
+    -- Example: save without changes, or debounced update fires after save
+    if self.last_update == start_changedtick then
+        logger.info("Actualize skipped, changetick unchanged: %d", start_changedtick)
+        return
+    end
+
+    -- Cancel existing requests (user made new changes before previous request completed)
     if self.pending_requests and self.pending_requests.cancel_fn then
         self.pending_requests.cancel_fn()
     end
@@ -235,21 +239,23 @@ function BufferLspWatcher:actualize_all_lsps(dry_run)
             end
         end
         self.pending_requests = nil
-        print("===Actualize cancelled, changetick:" .. start_changedtick)
+        logger.info("Actualize cancelled, changetick: %d", start_changedtick)
         self.symbols_watcher:cancel_lsp_actualization()
     end
 
     pending_requests.cancel_fn = cancel_fn
 
     -- Start actualization ONCE
-    print("===Actualize start, changetick:" .. start_changedtick)
+    logger.info("=== Actualize start, changetick: %d ===", start_changedtick)
     self.symbols_watcher:lsp_actualize()
 
     local function check_all_completion()
         if pending_clients == 0 and not cancelled_ref[1] then
             self.pending_requests = nil
+            -- Update last changedtick to prevent duplicate requests
+            self.last_update = start_changedtick
             vim.schedule(function()
-                print("===Actualize end, changetick:" .. start_changedtick)
+                logger.info("=== Actualize end, changetick: %d ===", start_changedtick)
                 self.symbols_watcher:finish_lsp_actualization()
             end)
         end

@@ -1,5 +1,6 @@
 local bit = require("bit")
 local SymbolInfo = require("referencer.symbols-watcher.symbol-info")
+local logger = require("referencer.logger").for_module("symbol_adorner")
 
 ---@class SymbolAdorner
 ---@field index integer
@@ -27,7 +28,7 @@ end
 function SymbolAdorner:init(opts, index, kind_mask)
     self.kinds_mask = kind_mask
     self.index = index
-    print("inited-with index:" .. index)
+    logger.debug("Adorner initialized with index: %d", index)
 end
 
 ---@param line integer

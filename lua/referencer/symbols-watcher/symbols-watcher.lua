@@ -1,6 +1,7 @@
 local event = require("referencer.event")
 local SymbolInfo = require("referencer.symbols-watcher.symbol-info")
 local LineInfo = require("referencer.symbols-watcher.line-info")
+local logger = require("referencer.logger").for_module("symbols_watcher")
 
 ---@alias FastChangeValidator fun(watcher:SymbolsWatcher, symbol:SymbolInfo, text_add:string):boolean
 
@@ -47,7 +48,6 @@ local LineInfo = require("referencer.symbols-watcher.line-info")
 ---@field is_lsp_actualizing boolean
 ---@field changetick integer
 ---@field is_stale boolean
----@field is_debug_visual boolean --- when we need to draw mark spans visually
 ---@field lines table<integer, LineInfo>
 ---@field fast_change_validator FastChangeValidator 
 ---@field OnLineCreated Event<LineEventArgs>
@@ -83,7 +83,6 @@ function SymbolsWatcher.new(bufnr, ns)
         buffer = bufnr,
         namespace = ns,
         is_actualizing = false,
-        is_debug_visual = false,
         OnLineCreated = event.new(),
         OnLineDestroyed = event.new(),
         OnSymbolLineChanged = event.new(),
@@ -146,7 +145,7 @@ function SymbolsWatcher:create_ext_mark_for_symbol(mark)
     ---@type MarkCore
     local mark_core = mark[SymbolInfo.CORE]
     if mark_core.col >= mark_core.end_col then
-        print("SWATCHER: ex mark not created -- bad size:" ..SymbolInfo.id_pos_to_string(mark))
+        logger.warn("ext_mark not created - bad size: %s", SymbolInfo.id_pos_to_string(mark))
         --strange, we don't need this
         return
     end
@@ -158,13 +157,9 @@ function SymbolsWatcher:create_ext_mark_for_symbol(mark)
         SymbolInfo.set_mark_id(mark, mark_id)
         --- we can not set this on first creation, so we had to set it after so it will
         -- mark[SymbolInfo.OPTS].end_right_gvavity = true
-        if self.is_debug_visual then 
-            print(string.format("SWATCHER: ext_mark CREATED :%d span:%s", mark_id, SymbolInfo.pos_to_string(mark)))
-        end
+        logger.debug("ext_mark CREATED: id=%d span=%s", mark_id, SymbolInfo.pos_to_string(mark))
     else
-        if self.is_debug_visual then 
-            print("SWATCHER: Error creating ext_mark:" .. SymbolInfo.pos_to_string(mark) .. vim.inspect(mark))
-        end
+        logger.error("Error creating ext_mark: %s data=%s", SymbolInfo.pos_to_string(mark), vim.inspect(mark))
     end
     return ok, mark_id
 end
@@ -175,6 +170,7 @@ end
 function SymbolsWatcher:update_symbol(data)
     local symbol, line, line_index, status = self:get_symbol_info(data)
     if status == SymbolStatus.SizeChanged then
+        ---@diagnostic disable: need-check-nil, param-type-mismatch
         local mark_core = symbol[SymbolInfo.CORE]
 
         local opts = symbol[SymbolInfo.OPTS]
@@ -185,14 +181,11 @@ function SymbolsWatcher:update_symbol(data)
             -- if mark_id ~= mark.opts.id then
             --     print("Warning, in changed! old:" .. mark.opts.id .. "->" .. mark_id)
             -- end
-            if self.is_debug_visual then 
-                print(string.format("Symbol:%s changed", SymbolInfo.id_pos_to_string(symbol)))
-            end
+            logger.debug("Symbol changed: %s", SymbolInfo.id_pos_to_string(symbol))
         end
+        ---@diagnostic enable: need-check-nil, param-type-mismatch
     else if symbol and status == SymbolStatus.BadSize then
-            if self.is_debug_visual then 
-                print("SWATCHER: symbol deleted cause of bad size:" ..SymbolInfo.id_pos_to_string(symbol) .. ":" .. vim.inspect(symbol))
-            end
+            logger.warn("Symbol deleted (bad size): %s data=%s", SymbolInfo.id_pos_to_string(symbol), vim.inspect(symbol))
             self:remove_symbol_and_destroy(line, symbol, line_index)
             return nil, status
         end
@@ -259,9 +252,8 @@ end
 function SymbolsWatcher:add_new_mark_info(line, col, end_col, data)
     local new_mark_info = SymbolInfo.new(line, col, end_col, data)
     self.new_symbols = self.new_symbols or {}
-    print("added new symbol for " .. SymbolInfo.id_pos_to_string(new_mark_info) .. data.sym.name)
+    logger.debug("Added new symbol: %s %s", SymbolInfo.id_pos_to_string(new_mark_info), data.sym.name)
     table.insert(self.new_symbols, new_mark_info)
-    -- print(string.format("added info:%d:%d", line, col))
     return new_mark_info
 end
 
@@ -270,10 +262,8 @@ end
 function SymbolsWatcher:create_line_info(line)
     local line_info = LineInfo.new(line)
 
-    -- Debug logging (optional, can be removed in production)
-    if self.is_debug_visual then 
-        print(string.format("SWATCHER: Line created: %d, is_dry: %s", line, tostring(self:is_dry())))
-    end
+    -- Debug logging
+    logger.debug("Line created: %d, is_dry=%s", line, tostring(self:is_dry()))
 
     ---@type LineEventArgs
     local event_args = {
@@ -313,10 +303,7 @@ end
 function SymbolsWatcher:destroy_symbol_mark(mark)
     local m_id = SymbolInfo.get_mark_id(mark)
     pcall(vim.api.nvim_buf_del_extmark, self.buffer, self.namespace, m_id)
-    if self.is_debug_visual then 
-        print(string.format("SWATCHER: ext_mark:%d DELETED p:%s ", m_id, SymbolInfo.pos_to_string(mark)))
-        --.. debug.traceback())
-    end
+    logger.debug("ext_mark DELETED: id=%d pos=%s", m_id, SymbolInfo.pos_to_string(mark))
 end
 
 ---@param start_index integer
@@ -392,10 +379,7 @@ function SymbolsWatcher:actualize_symbol_marks_positions(symbol_flag)
                 end
                 i = i + 1
             else
-                if self.is_debug_visual then
-                    print(string.format("SWATCHER: ext_mark destroyed by nvim for symbol, deleting symbol:%s",
-                    SymbolInfo.pos_to_string(symbol)))
-                end
+                logger.debug("ext_mark destroyed by nvim, deleting symbol: %s", SymbolInfo.pos_to_string(symbol))
                 --we should remove symbol, because mark was deleted and symbol probably too, if not it will be recreated again
                 --but it helps with deleting lines
                 table.remove(symbols, i)
@@ -465,9 +449,7 @@ function SymbolsWatcher:actualize_line_state(is_dry_run)
                         --we jumped no new line better update mark
                         --- we do not need to change it, unless from lsp data, line just jumped
                         -- LineInfo.needs_update(line_info)
-                        if self.is_debug_visual then 
-                            print(string.format("SWATCHER: moved line: %d to new line:%d is_dry:%s",line, symbolCore.line, tostring(self:is_dry())))
-                        end
+                        logger.debug("Moved line: %d -> %d, is_dry=%s", line, symbolCore.line, tostring(self:is_dry()))
                         goto continue
                     end
 
@@ -478,9 +460,7 @@ function SymbolsWatcher:actualize_line_state(is_dry_run)
                     end
 
                      self:merge_lines(i, line_info, existing_new_line)
-                    if self.is_debug_visual then 
-                        print(string.format("SWATCHER: merged lines: %d is_dry:%s",line, tostring(self:is_dry())))
-                    end
+                    logger.debug("Merged lines: %d, is_dry=%s", line, tostring(self:is_dry()))
                     -- Exit the while loop since no more symbols to process
                     break
                 else
@@ -538,9 +518,7 @@ function SymbolsWatcher:actualize_buffer_change(changetick)
     -- so we just actualize current marks and symbols, we do not create anything even when we have data in new_marks (lsp actualize can run at this moment)
     self:actualize_line_state(true)
     self.OnActualizeEnd:trigger({})
-    if self.is_debug_visual then 
-        print(string.format("[Dry run] ended"))
-    end
+    logger.debug("[Dry run] ended")
 end
 
 function SymbolsWatcher:lsp_actualize(changetick)
@@ -595,7 +573,7 @@ function SymbolsWatcher:finish_lsp_actualization()
     if new_symbols then
         while new_marks_idx <= #new_symbols do
             local symbol = new_symbols[new_marks_idx]
-            print("mark added")
+            logger.debug("Adding new mark to buffer")
 
             local ok, mark_id = self:create_ext_mark_for_symbol(symbol)
             ---@type MarkCore
@@ -604,11 +582,11 @@ function SymbolsWatcher:finish_lsp_actualization()
             if ok then
                 local line_info = self.lines[markCore.line]
                 if not line_info then
-                    print("created line" .. markCore.line)
+                    logger.debug("Created line info for line %d", markCore.line)
                     line_info = self:create_line_info(markCore.line)
                     self.lines[markCore.line] = line_info
                 end
-                print("adding symbol to line with mark_id:" .. mark_id)
+                logger.debug("Adding symbol to line with mark_id: %d", mark_id)
                 table.insert(line_info.symbols, symbol)
                 self:change_symbol_line(nil,line_info, symbol)
             else
@@ -616,7 +594,7 @@ function SymbolsWatcher:finish_lsp_actualization()
                 --so we should tell adorners to delete it
                 -- self:destroy_symbol_mark(symbol)
                 self.OnSymbolMarkDestroyed:trigger(symbol)
-                print("symbol is wrong")
+                logger.warn("Symbol mark creation failed - position invalid")
             end
             new_marks_idx = new_marks_idx + 1
         end
@@ -631,14 +609,17 @@ function SymbolsWatcher:finish_lsp_actualization()
     end
 
     self.is_lsp_actualizing = false
-    if self.is_debug_visual then
-        print(string.format(
-            "[SymbolInfos] new_marks=%d | lines %d | created=%d | changed=%d | deleted=%d |\nis_dry=%s",
-            new_symbols and #new_symbols or 0, vim.tbl_count(self.lines), created_counter, changed_counter, delete_counter
-            , vim.inspect(self:is_dry())
-            -- , vim.inspect(ctx.calls)
-        ))
-    end
+    logger.debug_lazy(function()
+        return string.format(
+            "[SymbolInfos] new_marks=%d | lines=%d | created=%d | changed=%d | deleted=%d | is_dry=%s",
+            new_symbols and #new_symbols or 0,
+            vim.tbl_count(self.lines),
+            created_counter,
+            changed_counter,
+            delete_counter,
+            vim.inspect(self:is_dry())
+        )
+    end)
     self.OnActualizeEnd:trigger({})
     self.new_symbols = {}
     self.is_stale = false

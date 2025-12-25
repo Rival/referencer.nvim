@@ -1,5 +1,7 @@
 local bit = require("bit")
 local config = require("referencer.config")
+local logger_module = require("referencer.logger")
+local logger = logger_module.for_module("init")
 local BufferLspWatcher = require("referencer.buffer-watcher")
 local utils = require("referencer.utils")
 local virtual_lines_mode = require("referencer.adorners.virtual-lines-adorner")
@@ -22,10 +24,10 @@ local kinds_mask = 0
 local function create_adorner(symbol_watcher, adorner_opts)
     local current_mode = nil
     if adorner_opts.type == "virtual_line" then
-        print("virtual-lines-mode enabledt")
+        logger.debug("Creating virtual-lines-mode adorner")
         current_mode = virtual_lines_mode:new(symbol_watcher)
     else
-        print("inline_mode enabledt")
+        logger.debug("Creating inline-mode adorner")
         current_mode = inline_mode:new(symbol_watcher)
     end
     -- current_mode:init(user_opts, ns)
@@ -170,13 +172,11 @@ local function resolve_options(options, watcher)
 
     for ad_opts, kind_opts in pairs(adorners_opts) do
         local opts_copy = vim.deepcopy(ad_opts)
-        -- print(string.format("kind_opts.kinds: %s", vim.inspect(kind_opts.kinds)))
-        print("adorner:" .. opts_copy.type .. "parsing for kinds:" .. vim.inspect(kind_opts.kinds))
+        logger.info("Adorner %s parsing for kinds: %s", opts_copy.type, vim.inspect(kind_opts.kinds))
         -- key is options, setting kinds to filter
         local adorner_for_kinds = create_adorner(watcher.symbols_watcher, opts_copy)
         local kind_mask = to_lsp_symbol_kinds_mask(kind_opts.kinds)
         watcher:add_adorner(adorner_for_kinds, opts_copy, kind_mask)
-        -- print(string.format("options resolved: %s", vim.inspect(opts_copy)))
     end
 end
 
@@ -191,12 +191,14 @@ local function get_or_create_watcher_and_adorners(buffer)
     watcher_per_buffer[buffer] = watcher
     resolve_options(opts, watcher)
 
-    --call updates only for specific buffer
+    -- Debounced update: delays LSP requests until typing stops (reduces spam)
     local debounced_update = utils.debounce(function()
         watcher:actualize_all_lsps(false)
     end, opts.update_debounce_time)
 
-    if opts.auto_update == "change" then
+    -- Auto-update mode: "change" - Live updates while typing (only active buffer)
+    -- Auto-update mode: "both"   - Combines change + save modes
+    if opts.auto_update == "change" or opts.auto_update == "both" then
         vim.api.nvim_create_autocmd({ "TextChanged", "TextChangedI" }, {
             group = group,
             buffer = buffer,  -- Specific to this buffer
@@ -212,12 +214,14 @@ local function get_or_create_watcher_and_adorners(buffer)
         })
     end
 
-    if opts.auto_update == "save" then
+    -- Auto-update mode: "save" - Update on file save (works even for background buffers)
+    -- Auto-update mode: "both" - Combines change + save modes
+    if opts.auto_update == "save" or opts.auto_update == "both" then
         vim.api.nvim_create_autocmd("BufWritePost", {
             group = group,
             buffer = buffer,
             callback = function(e)
-                watcher:actualize_all_lsps(false)
+                watcher:actualize_all_lsps(false)  -- Full update (no debounce on save)
             end,
         })
     end
@@ -313,6 +317,12 @@ function M.setup(user_opts)
     utils.clear_client_cache()
     config.setup(user_opts)
     opts = config.options
+
+    -- Initialize logger with user config
+    if opts.logging then
+        logger_module.setup(opts.logging)
+    end
+
     kinds_mask = to_lsp_symbol_kinds_mask(opts.kinds or {})
     vim.api.nvim_create_user_command("ReferencerToggle", M.toggle, {})
     vim.api.nvim_create_user_command("ReferencerUpdate", M.update, {})

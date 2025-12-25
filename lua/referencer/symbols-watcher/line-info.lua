@@ -1,4 +1,5 @@
 local ffi = require("ffi")
+local logger = require("referencer.logger").for_module("line_info")
 
 ffi.cdef[[
     typedef struct {
@@ -40,7 +41,7 @@ end
 ---@param line_info LineInfo
 function M.needs_update(line_info)
     line_info[M.CORE].update = true
-    print(string.format("line needs update: %d", line_info[M.CORE].line))
+    logger.debug("Line needs update: %d", line_info[M.CORE].line)
 end
 
 ---@param line_info LineInfo

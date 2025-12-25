@@ -4,6 +4,7 @@ local SymbolAdorner = require("referencer.adorners.symbol-adorner")
 local SymbolsWatcher = require("referencer.symbols-watcher.symbols-watcher")
 local SymbolInfo = require("referencer.symbols-watcher.symbol-info")
 local LineInfo = require("referencer.symbols-watcher.line-info")
+local logger = require("referencer.logger").for_module("virtual_lines_adorner")
 
 
 ---@class VirtualLineAdornerOptions : SymbolAdornerOpions
@@ -213,8 +214,7 @@ true
     if current_col == 0 then
         --all symbols become not drawable (maybe they changed their type), we better delete mark
         if line_data.mark_id and line_data.mark_id > 0 then
-            print(string.format("VIRTUAL LINES: line destroyed so symbols to draw: %d mark:%d", line, line_data.mark_id))
-            -- print(string.format("line mark destroyed: %d mark:%d is_dry:%s",args.line, args.line_state.mark_id, tostring(watcher:is_dry())))
+            logger.debug("Virtual line destroyed - no symbols to draw: line=%d mark=%d", line, line_data.mark_id)
             pcall(vim.api.nvim_buf_del_extmark, adorner.watcher.buffer, adorner.watcher.namespace, line_data.mark_id)
         end
         return
@@ -230,13 +230,11 @@ true
             virt_lines_overflow = "scroll"
         })
 
-        -- print(vim.inspect(virt_text_chunks))
-
         if ok then
             if not line_data.mark_id then
-                print(string.format("VIRTUAL LINES: line mark created: %d mark_id:%d", line, id))
+                logger.debug("Virtual line mark created: line=%d mark_id=%d", line, id)
             else
-                print("line:" .. line .. "changed")
+                logger.debug("Virtual line changed: line=%d", line)
             end
             line_data.mark_id = id
         end
@@ -281,7 +279,7 @@ function VirtualLinesAdorner:Enable()
             local line_info = self.watcher:get_line_info_for_symbol(symbol)
             local line_data = LineInfo.get_or_create_adorner_data(line_info, self)
             line_data.needs_update = true
-            print(string.format("VIRTUAL LINES: line needs update: %d symbol mark changed", line_info[LineInfo.CORE].line, SymbolInfo.get_mark_id(symbol)))
+            logger.debug("Virtual line needs update: line=%d symbol mark changed", line_info[LineInfo.CORE].line)
         end
     end))
     
@@ -292,13 +290,13 @@ function VirtualLinesAdorner:Enable()
             local line_info = self.watcher:get_line_info_for_symbol(args.symbol)
             local line_data = LineInfo.get_or_create_adorner_data(line_info, self)
             line_data.needs_update = true
-            print(string.format("VIRTUAL LINES: line needs update: %d symbol data updated",line_info[LineInfo.CORE].line, SymbolInfo.get_mark_id(args.symbol)))
+            logger.debug("Virtual line needs update: line=%d symbol data updated", line_info[LineInfo.CORE].line)
         end
     end))
     
     ---@param args LineSymbolsChangedEventArgs
     self:AddUnsubHook(self.watcher.OnSymbolLineChanged:subscribe(function (args)
-        if 
+        if
             -- (self.watcher:is_dry() or self.watcher.is_stale)
             -- and
             self:is_symbol_supported(args.symbol)
@@ -309,7 +307,7 @@ function VirtualLinesAdorner:Enable()
                 local old_line_data = LineInfo.get_or_create_adorner_data(args.old_line, self)
                 old_line_data.needs_update = true
             end
-            print(string.format("VIRTUAL LINES: line needs update: %d symbol line changed",args.line_info[LineInfo.CORE].line, SymbolInfo.get_mark_id(args.symbol)))
+            logger.debug("Virtual line needs update: line=%d symbol line changed", args.line_info[LineInfo.CORE].line)
         end
     end))
     
@@ -319,7 +317,7 @@ function VirtualLinesAdorner:Enable()
             local line_info = self.watcher:get_line_info_for_symbol(symbol)
             local line_data = LineInfo.get_or_create_adorner_data(line_info, self)
             line_data.needs_update = true
-            print(string.format("VIRTUAL LINES: line needs update: %d symbol destroyed",line_info[LineInfo.CORE].line, SymbolInfo.get_mark_id(symbol)))
+            logger.debug("Virtual line needs update: line=%d symbol destroyed", line_info[LineInfo.CORE].line)
         end
     end))
     
@@ -327,8 +325,7 @@ function VirtualLinesAdorner:Enable()
     self:AddUnsubHook(self.watcher.OnLineDestroyed:subscribe(function (args)
         local adorner_data = LineInfo.get_adorner_data(args.line_info, self)
         if adorner_data and adorner_data.mark_id and adorner_data.mark_id > 0 then
-            print(string.format("VIRTUAL LINES: line destroyed: %d mark:%d is_dry:%s",args.line, adorner_data.mark_id, tostring(self.watcher:is_dry())))
-            -- print(string.format("line mark destroyed: %d mark:%d is_dry:%s",args.line, args.line_state.mark_id, tostring(watcher:is_dry())))
+            logger.debug("Virtual line destroyed: line=%d mark=%d is_dry=%s", args.line, adorner_data.mark_id, tostring(self.watcher:is_dry()))
             pcall(vim.api.nvim_buf_del_extmark, self.watcher.buffer, self.watcher.namespace, adorner_data.mark_id)
         end
     end))

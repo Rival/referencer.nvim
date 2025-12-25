@@ -47,6 +47,8 @@ local SymbolKind = {
 ---@field kinds? table<SymbolKind, SymbolAdornerOpions>
 
 
+---@alias AutoUpdateMode "none" | "save" | "change" | "both"
+
 ---@class ReferencerConfig
 ---@field enable? boolean
 ---@field adorner? SymbolAdornerOpions | string
@@ -55,8 +57,9 @@ local SymbolKind = {
 ---@field filetype? table<string, ReferencerFiletypeOption>
 ---@field SymbolKinds? SymbolKind[]
 ---@field update_debounce_time? integer
----@field auto_update? string
+---@field auto_update? AutoUpdateMode
 ---@field show_no_reference? boolean
+---@field logging? LoggerConfig
 
 local M = {}
 
@@ -99,8 +102,13 @@ M.options = {
         align_first = "most_left",
         align_following = "most_left"
     },
-    auto_update = "change",  -- "none", "save", "change"
-    update_debounce_time = 500,  -- how long to wait after text update
+    -- Auto-update modes:
+    -- • "none"   - No automatic updates (use :lua require('referencer').refresh() manually)
+    -- • "save"   - Update on BufWritePost (when you :w) - works for all buffers including background
+    -- • "change" - Update on TextChanged/TextChangedI (live updates while typing) - only active buffer
+    -- • "both"   - Combines "change" and "save" - live updates + guaranteed refresh on save
+    auto_update = "both",
+    update_debounce_time = 500,  -- Milliseconds to wait after last change before LSP request (only for "change"/"both" modes)
 }
 
 local hl_group_from_color = nil
