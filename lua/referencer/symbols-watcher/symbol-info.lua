@@ -9,8 +9,8 @@ ffi.cdef[[
         int32_t prev_line;
         int32_t prev_col;
         int32_t prev_end_col;
-        bool updated;
-        bool stale;
+        bool mark_updated;
+        int32_t validated_tick;
         int32_t _reserved;
     } MarkCore;
 ]]
@@ -23,8 +23,10 @@ ffi.cdef[[
 ---@field prev_line integer
 ---@field prev_col integer
 ---@field prev_end_col integer
----@field updated boolean
----@field stale boolean
+--- Flag to mark if its extmark exists when actualyzing buffer changes
+---@field mark_updated boolean
+--- Buffer changetick when this symbol was last validated (0 = needs validation)
+---@field validated_tick integer
 ---@field _reserved integer
 
 
@@ -62,8 +64,8 @@ function M.new(line, col, end_col, symbol_data)
     core.col = col
     core.end_col = end_col
     core.mark_id = -1
-    core.updated = false
-    core.stale = false
+    core.mark_updated = false
+    core.validated_tick = 0  -- 0 = needs validation
     core._reserved = 0
 
     return {
@@ -163,26 +165,31 @@ end
 
 ---@param mark SymbolInfo
 ---@return boolean
-function M.is_updated(mark)
-    return mark[CORE].updated
+function M.is_mark_updated(mark)
+    return mark[CORE].mark_updated
+end
+
+---Check if symbol needs validation (tick-based staleness)
+---@param mark SymbolInfo
+---@param current_tick integer Current buffer changetick
+---@param max_tick_delta? integer Maximum tick difference before considering stale (default: 0 = must match current)
+---@return boolean True if symbol needs revalidation
+function M.is_stale(mark, current_tick, max_tick_delta)
+    max_tick_delta = max_tick_delta or 0
+    local tick_delta = current_tick - mark[CORE].validated_tick
+    return tick_delta > max_tick_delta
 end
 
 ---@param mark SymbolInfo
 ---@return boolean
-function M.is_stale(mark)
-    return mark[CORE].stale
-end
-
----@param mark SymbolInfo
----@return boolean
-function M.is_not_updated(mark)
-    return mark[CORE].updated == false
+function M.is_not_mark_updated(mark)
+    return mark[CORE].mark_updated == false
 end
 
 ---@param mark SymbolInfo
 ---@param updated boolean
-function M.set_updated(mark, updated)
-    mark[CORE].updated = updated
+function M.set_mark_updated(mark, updated)
+    mark[CORE].mark_updated = updated
 end
 
 ---@param mark SymbolInfo
@@ -274,10 +281,24 @@ function M.is_bad_size_for_data(data)
     return col >= end_col
 end
 
----Mark symbol as stale (needs refresh)
+---Mark symbol as needing validation (set tick to 0)
 ---@param mark SymbolInfo
-function M.set_stale(mark)
-    mark[CORE].stale = true
+function M.set_needs_validation(mark)
+    mark[CORE].validated_tick = 0
+end
+
+---Update symbol's validated tick
+---@param mark SymbolInfo
+---@param tick integer Buffer changetick when validated
+function M.set_validated_tick(mark, tick)
+    mark[CORE].validated_tick = tick
+end
+
+---Get when symbol was last validated
+---@param mark SymbolInfo
+---@return integer Buffer changetick of last validation
+function M.get_validated_tick(mark)
+    return mark[CORE].validated_tick
 end
 
 
@@ -288,19 +309,19 @@ function M.get_symbol_data(mark)
     return mark[SYMBOL_DATA]
 end
 
----Update symbol data and mark as fresh
+---Update symbol data and mark as validated
 ---@param mark SymbolInfo
 ---@param data SymbolData
 ---@param end_col integer
-function M.set_symbol_data(mark, data, end_col)
+---@param validated_tick integer Buffer changetick when this data was validated
+function M.set_symbol_data(mark, data, end_col, validated_tick)
     ---@type MarkCore
     local core = mark[CORE]
     mark[SYMBOL_DATA] = data
     mark[OPTS].end_col = end_col
     core.end_col = end_col
-    core.updated = true
-    -- Data is fresh so we are not stale
-    core.stale = false
+    -- Data is fresh - update validation tick
+    core.validated_tick = validated_tick or 0
 end
 
 ---Get extmark options (lazy initialized)

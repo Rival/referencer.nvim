@@ -230,7 +230,7 @@ end
 function M.flash_extmarks(bufnr)
     local referencer = require("referencer")
     local helper_flash = require("referencer.helper-flash")
-    local swatcher = referencer.get_current_symbols_watcher_for_buffer(bufnr)
+    local swatcher = referencer.get_SymbolsWatcher(bufnr)
 
     for line, line_info in pairs(swatcher.lines) do
         for i, symbol in ipairs(line_info.symbols) do

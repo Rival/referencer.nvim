@@ -6,9 +6,14 @@ local BufferLspWatcher = require("referencer.buffer-watcher")
 local utils = require("referencer.utils")
 local virtual_lines_mode = require("referencer.adorners.virtual-lines-adorner")
 local inline_mode = require("referencer.adorners.inline-adorner")
+local DebugHud = require("referencer.debug-hud")
+require("referencer.highlight-util")  -- Initialize Flash* highlight groups
 
 local ns = vim.api.nvim_create_namespace("Referencer")
 local group = vim.api.nvim_create_augroup("Referencer", { clear = true })
+
+-- Global debug HUD instance
+local debug_hud = nil
 
 
 ---@class Referencer
@@ -189,6 +194,15 @@ local function get_or_create_watcher_and_adorners(buffer)
 
     watcher = BufferLspWatcher.new(buffer, ns, opts, kinds_mask)
     watcher_per_buffer[buffer] = watcher
+
+    -- Create viewport if enabled
+    if opts.viewport and opts.viewport.enabled then
+        local Viewport = require("referencer.viewport")
+        watcher.viewport = Viewport.new(buffer, opts.viewport)
+        watcher.symbols_watcher.viewport = watcher.viewport
+        logger.debug("Viewport created for buffer %d", buffer)
+    end
+
     resolve_options(opts, watcher)
 
     -- Debounced update: delays LSP requests until typing stops (reduces spam)
@@ -234,6 +248,22 @@ local function get_or_create_watcher_and_adorners(buffer)
             watcher:destroy()
         end
     })
+
+    -- Viewport scroll handling: Update visible range and load newly visible symbols
+    if opts.viewport and opts.viewport.enabled and watcher.viewport then
+        local debounced_scroll = utils.debounce(function()
+            watcher.viewport:update()
+            -- Fetch refs for newly visible symbols (cache prevents re-requests for existing symbols)
+            watcher:actualize_all_lsps(false, true)
+        end, opts.viewport.scroll_debounce)
+
+        vim.api.nvim_create_autocmd("WinScrolled", {
+            group = group,
+            buffer = buffer,
+            callback = debounced_scroll
+        })
+        logger.debug("WinScrolled autocmd registered for buffer %d", buffer)
+    end
 
     return watcher
 end
@@ -311,6 +341,15 @@ function M.update()
 end
 
 
+---Toggle debug HUD
+function M.toggle_debug_hud()
+    if not debug_hud then
+        vim.notify("Debug HUD not initialized", vim.log.levels.WARN)
+        return
+    end
+    debug_hud:toggle()
+end
+
 ---@param user_opts ReferencerConfig
 function M.setup(user_opts)
     -- require("referencer.benhcmark")
@@ -323,9 +362,28 @@ function M.setup(user_opts)
         logger_module.setup(opts.logging)
     end
 
+    -- Initialize debug HUD
+    if opts.debug_hud then
+        debug_hud = DebugHud.new(opts.debug_hud)
+        if opts.debug_hud.enabled then
+            debug_hud:start()
+        end
+
+        -- Handle window resize
+        vim.api.nvim_create_autocmd("VimResized", {
+            group = group,
+            callback = function()
+                if debug_hud and debug_hud.config.enabled then
+                    debug_hud:update_position()
+                end
+            end,
+        })
+    end
+
     kinds_mask = to_lsp_symbol_kinds_mask(opts.kinds or {})
     vim.api.nvim_create_user_command("ReferencerToggle", M.toggle, {})
     vim.api.nvim_create_user_command("ReferencerUpdate", M.update, {})
+    vim.api.nvim_create_user_command("ReferencerDebugHud", M.toggle_debug_hud, {})
 
     if (opts.enable) then
         M.toggle()

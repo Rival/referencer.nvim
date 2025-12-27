@@ -10,7 +10,7 @@ local LogLevel = {
     ERROR = 4,
 }
 
----@class LoggerConfig
+---@class ReferencerLoggerConfig
 ---@field enabled boolean Global logging toggle
 ---@field level LogLevel|string|integer Minimum level to log (number 1-4 or string "DEBUG"/"INFO"/"WARN"/"ERROR")
 ---@field modules table<string, boolean> Per-module toggles
@@ -21,7 +21,7 @@ local LogLevel = {
 local M = {}
 
 -- Default configuration
----@type LoggerConfig
+---@type ReferencerLoggerConfig
 M.config = {
     enabled = false,  -- Master switch (disables ALL logging)
     level = LogLevel.DEBUG,  -- Show everything by default
@@ -45,7 +45,7 @@ M.config = {
 M.LogLevel = LogLevel
 
 ---Setup logger configuration
----@param opts LoggerConfig
+---@param opts ReferencerLoggerConfig
 function M.setup(opts)
     -- Convert string level to number if needed
     if opts and opts.level then

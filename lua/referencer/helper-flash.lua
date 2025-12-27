@@ -2,50 +2,8 @@ local M = {}
 
 local flash_ns = vim.api.nvim_create_namespace("rainbow_flash")
 local debug_ns = vim.api.nvim_create_namespace("debug_marks")
-local current_index = 0
 local debug_mode = false
 local debug_marks = {}  -- Store active debug marks
-
-local COLORS = {
-    {name = "FlashRed",     bg = "#ff0000", fg = "#ffffff"},
-    {name = "FlashOrange",  bg = "#ff8800", fg = "#000000"},
-    {name = "FlashYellow",  bg = "#ffff00", fg = "#000000"},
-    {name = "FlashGreen",   bg = "#00ff00", fg = "#000000"},
-    {name = "FlashCyan",    bg = "#00ffff", fg = "#000000"},
-    {name = "FlashBlue",    bg = "#0088ff", fg = "#ffffff"},
-    {name = "FlashPurple",  bg = "#8800ff", fg = "#ffffff"},
-    {name = "FlashPink",    bg = "#ff00ff", fg = "#ffffff"},
-    {name = "FlashMagenta", bg = "#ff0088", fg = "#ffffff"},
-    {name = "FlashLime",    bg = "#88ff00", fg = "#000000"},
-}
-
--- Setup all highlights
-for _, color in ipairs(COLORS) do
-    vim.api.nvim_set_hl(0, color.name, {
-        bg = color.bg,
-        fg = color.fg,
-        bold = true,
-    })
-end
-
----Get next color in rotation
----@return string
-function M.get_next_color()
-    current_index = (current_index % #COLORS) + 1
-    return COLORS[current_index].name
-end
-
----Get specific color by index (1-10)
----@param index number
----@return string
-function M.get_color(index)
-    return COLORS[((index - 1) % #COLORS) + 1].name
-end
-
----Reset color cycle
-function M.reset_cycle()
-    current_index = 0
-end
 
 ---Flash area temporarily
 ---@param bufnr number

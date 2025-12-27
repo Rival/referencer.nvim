@@ -49,6 +49,22 @@ local SymbolKind = {
 
 ---@alias AutoUpdateMode "none" | "save" | "change" | "both"
 
+---@class ViewportConfig
+---@field enabled boolean Enable viewport-based rendering
+---@field buffer_lines integer Lines above/below viewport to preload (default: 10)
+---@field scroll_debounce integer Debounce delay for scroll events in ms (default: 150)
+---@field lazy_load_offscreen boolean Load non-visible symbols in background (default: true)
+
+---@class DebugHudConfig
+---@field enabled boolean Enable debug HUD
+---@field position "top-right" | "top-left" | "bottom-right" | "bottom-left"
+---@field width integer
+---@field height integer
+---@field update_interval integer Update frequency in milliseconds
+---@field border "none" | "single" | "double" | "rounded" | "solid" | "shadow"
+---@field row_offset integer Offset from top/bottom edge (for avoiding notifications)
+---@field col_offset integer Offset from left/right edge
+
 ---@class ReferencerConfig
 ---@field enable? boolean
 ---@field adorner? SymbolAdornerOpions | string
@@ -59,7 +75,9 @@ local SymbolKind = {
 ---@field update_debounce_time? integer
 ---@field auto_update? AutoUpdateMode
 ---@field show_no_reference? boolean
----@field logging? LoggerConfig
+---@field logging? ReferencerLoggerConfig
+---@field viewport? ViewportConfig
+---@field debug_hud? DebugHudConfig
 
 local M = {}
 
@@ -109,6 +127,28 @@ M.options = {
     -- • "both"   - Combines "change" and "save" - live updates + guaranteed refresh on save
     auto_update = "both",
     update_debounce_time = 500,  -- Milliseconds to wait after last change before LSP request (only for "change"/"both" modes)
+
+    -- Viewport rendering (optimization for large files):
+    -- Only process symbols visible in viewport, lazy-load the rest
+    -- Significantly improves performance on files with 100+ symbols
+    viewport = {
+        enabled = false,              -- Default: disabled (opt-in for stability)
+        buffer_lines = 10,            -- Extra lines above/below viewport to preload
+        scroll_debounce = 150,        -- Debounce scroll events (ms)
+        lazy_load_offscreen = true,   -- Load non-visible symbols in background
+    },
+
+    -- Debug HUD (floating window showing plugin state in real-time)
+    debug_hud = {
+        enabled = false,              -- Default: disabled (toggle with :ReferencerDebugHud)
+        position = "top-right",       -- Position on screen
+        width = 40,                   -- Window width
+        height = 15,                  -- Window height
+        update_interval = 200,        -- Update frequency in ms
+        border = "rounded",           -- Border style
+        row_offset = 0,               -- Offset from top/bottom (e.g., 3 to avoid notifications)
+        col_offset = 0,               -- Offset from left/right
+    },
 }
 
 local hl_group_from_color = nil

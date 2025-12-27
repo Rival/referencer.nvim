@@ -35,7 +35,8 @@ VirtualLinesAdorner.aligners = {}
 ---@type GetVirtualTextBySymbol
 function VirtualLinesAdorner.aligners.most_left(adorner, line, span_col, span_end_col, symbol_col, symbol_end_col, symbol_info)
     local refs_count = #SymbolInfo.get_symbol_data(symbol_info).refs - 1
-    if SymbolInfo.is_stale(symbol_info) then
+    -- Check if symbol needs validation (validated_tick == 0)
+    if SymbolInfo.get_validated_tick(symbol_info) == 0 then
         return "?", span_col
     end
     local text = string.format(config.options.format or "→ %d", refs_count)
@@ -332,12 +333,17 @@ function VirtualLinesAdorner:Enable()
 
     self:AddUnsubHook(self.watcher.OnActualizeEnd:subscribe(function (args)
         for line, line_state in pairs(self.watcher.lines) do
+            -- Adorner is a pure renderer - if told to update, just do it
+            -- Viewport filtering happens upstream in buffer-watcher
+
             local adorner_data = LineInfo.get_adorner_data(line_state, self)
             if adorner_data and adorner_data.needs_update then
                 ---@cast adorner_data VirtualLineData
                 -- Always update virtual lines (remove 'changed' check since it's not set anywhere)
                 update_virtual_line_for_line(self, line_state, adorner_data, line)
             end
+
+            ::continue::
         end
     end))
 end
