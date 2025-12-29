@@ -5,14 +5,14 @@ local logger = require("referencer.logger").for_module("symbols_watcher")
 
 ---@alias FastChangeValidator fun(watcher:SymbolsWatcher, symbol:SymbolInfo, text_add:string):boolean
 
----@class AclualizationContext
+---@class ActualizationContext
 ---@field line_states table<integer,LineInfo> line states for buffer
 ---@field new_mark_infos SymbolInfo | nil marks infos to be created on actualization end
 
 ---@class SymbolData
 ---@field kind integer LSP kind converted to bitmask
 ---@field sym lsp.DocumentSymbol LSP symbol info
----@field refs lsp.CompletionListCapabilities[] referesces from LSP
+---@field refs lsp.CompletionListCapabilities[] references from LSP
 
 ---@class MarkOpts
 ---@field id? integer Extmark ID (set after creation)
@@ -181,10 +181,6 @@ function SymbolsWatcher:update_symbol(data)
         if ok then
             SymbolInfo.set_mark_id(symbol, mark_id)
             SymbolInfo.set_mark_updated(symbol, true)
-            -- when set_extmark returns an id, update stored id and text
-            -- if mark_id ~= mark.opts.id then
-            --     print("Warning, in changed! old:" .. mark.opts.id .. "->" .. mark_id)
-            -- end
             logger.debug("Symbol changed: %s", SymbolInfo.id_pos_to_string(symbol))
         end
         ---@diagnostic enable: need-check-nil, param-type-mismatch
@@ -294,7 +290,6 @@ end
 ---@param line integer
 ---@param line_info LineInfo
 function SymbolsWatcher:destroy_line_state(line, line_info)
-    -- print("deleting line state" .. line)
     self.OnLineDestroyed:trigger({line = line, line_info = line_info})
 end
 
@@ -302,6 +297,10 @@ end
 ---@param line_info LineInfo
 function SymbolsWatcher:remove_symbol_and_destroy(line_info, symbol, i)
     table.remove(line_info.symbols, i)
+
+    -- Update indices for remaining symbols (removal shifts following symbols)
+    LineInfo.update_symbol_indices(line_info)
+
     self:destroy_symbol_mark(symbol)
     self.OnSymbolMarkDestroyed:trigger(symbol)
     LineInfo.needs_update(line_info)
@@ -319,25 +318,32 @@ end
 ---@param line_info LineInfo Source line to merge symbols from
 ---@param existing_new_line LineInfo Target line to merge symbols into
 function SymbolsWatcher:merge_lines(start_index, line_info, existing_new_line)
-    -- table.move(line_state.symbols, start_index, #line_state.symbols, #existing_new_line.symbols + 1, existing_new_line.symbols)
     local symbols = line_info.symbols
     for j = start_index, #symbols do
-        table.insert(existing_new_line.symbols, symbols[j])
-        self:change_symbol_line(line_info, existing_new_line, symbols[j])
+        -- Batch insertion: append unsorted, will sort once after loop
+        LineInfo.add_symbol_unsorted(existing_new_line, symbols[j])
+        self:on_change_symbol_line(line_info, existing_new_line, symbols[j])
     end
 
     -- Clear remaining symbols - they've all moved
     for j = #symbols, start_index, -1 do
         table.remove(symbols, j)
     end
-    line_info[LineInfo.CORE].update = true
+
+    -- Sort once after batch
+    table.sort(existing_new_line.symbols, function(a, b) return a[SymbolInfo.CORE].col < b[SymbolInfo.CORE].col end)
+
+    -- Update indices after sorting (symbols may have moved positions)
+    LineInfo.update_symbol_indices(existing_new_line)
+
+    LineInfo.needs_update(line_info)
 end
 
 ---Notify listeners when a symbol moves to a different line
 ---@param old_line LineInfo|nil Previous line (nil for new symbols)
 ---@param existing_new_line LineInfo New line the symbol moved to
 ---@param symbol SymbolInfo Symbol that changed lines
-function SymbolsWatcher:change_symbol_line(old_line, existing_new_line, symbol)
+function SymbolsWatcher:on_change_symbol_line(old_line, existing_new_line, symbol)
     ---@type LineSymbolsChangedEventArgs
     local event_args = {
         line_info = existing_new_line,
@@ -468,6 +474,9 @@ function SymbolsWatcher:actualize_symbol_marks_positions(symbol_flag)
                 logger.debug("ext_mark destroyed by nvim, deleting symbol: %s", SymbolInfo.pos_to_string(symbol))
 
                 table.remove(symbols, i)
+                -- Update indices for remaining symbols (removal shifts following symbols)
+                LineInfo.update_symbol_indices(line_info)
+
                 self.OnSymbolMarkDestroyed:trigger(symbol)
                 LineInfo.needs_update(line_info)
                 -- Don't increment i - we removed current element, next is now at position i
@@ -500,7 +509,21 @@ function SymbolsWatcher:get_line_text(line)
     return vim.api.nvim_buf_get_lines(self.buffer, line, line + 1, false)[1] or ""
 end
 
----@param buffer_changed_run boolean true when buffer changed (quick update), false when doing full LSP actualization
+--- Actualizes the line state after buffer changes or LSP updates.
+--- This function handles symbol movements across lines, merging symbols that jumped
+--- to the same line, and cleaning up empty lines.
+---
+--- Algorithm:
+--- 1. First actualizes symbol mark positions via actualize_symbol_marks_positions()
+--- 2. Iterates through all tracked lines and their symbols
+--- 3. For each symbol, checks if it jumped to a different line:
+---    - If all remaining symbols on the line jumped together: moves/merges entire line_info
+---    - If only some symbols jumped: migrates individual symbols to target lines
+--- 4. Triggers OnSymbolMarkChanged event for symbols that changed
+--- 5. Cleans up empty lines (no symbols remaining)
+--- 6. Replaces self.lines with the new line mapping
+---
+--- @param buffer_changed_run boolean true when buffer changed (quick update), false when doing full LSP actualization
 function SymbolsWatcher:actualize_line_state(buffer_changed_run)
     --first we actualize symbols info only
     self:actualize_symbol_marks_positions(buffer_changed_run)
@@ -558,11 +581,16 @@ function SymbolsWatcher:actualize_line_state(buffer_changed_run)
                         new_lines[symbolCore.line] = existing_new_line
                     end
 
+                    --removing from old line
                     table.remove(symbols, i)
-                    table.insert(existing_new_line.symbols, symbol)
-                    self:change_symbol_line(line_info, existing_new_line, symbol)
+                    -- Update indices for remaining symbols on old line
+                    LineInfo.update_symbol_indices(line_info)
                     LineInfo.needs_update(line_info)
-                    -- Don't increment i (removed element, next is now at i)
+
+                    -- adding to existing_new_line (add_symbol will update indices)
+                    LineInfo.add_symbol(existing_new_line, symbol)
+                    self:on_change_symbol_line(line_info, existing_new_line, symbol)
+                    -- Don't increment i for current line (removed element, next is now at i)
                 end
             else
                 if SymbolInfo.if_changed(symbol) then
@@ -692,8 +720,9 @@ function SymbolsWatcher:finish_lsp_actualization()
                     self.lines[markCore.line] = line_info
                 end
                 logger.debug("Adding symbol to line with mark_id: %d", mark_id)
-                table.insert(line_info.symbols, symbol)
-                self:change_symbol_line(nil,line_info, symbol)
+                -- Single insertion: binary search + insert is faster than full sort
+                LineInfo.add_symbol(line_info, symbol)
+                self:on_change_symbol_line(nil,line_info, symbol)
             else
                 --symbol was created by lsp, but something changed alrealy and this position doesn't exist
                 --so we should tell adorners to delete it

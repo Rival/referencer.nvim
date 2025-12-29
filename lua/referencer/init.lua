@@ -18,7 +18,6 @@ local debug_hud = nil
 
 ---@class Referencer
 local M = {}
--- M.enable = false
 
 ---@type ReferencerConfig
 local opts = nil
@@ -35,7 +34,6 @@ local function create_adorner(symbol_watcher, adorner_opts)
         logger.debug("Creating inline-mode adorner")
         current_mode = inline_mode:new(symbol_watcher)
     end
-    -- current_mode:init(user_opts, ns)
     return current_mode
 end
 
@@ -67,12 +65,11 @@ local function to_lsp_symbol_kinds_mask(symbol_kinds)
             if not symbol_kind_lsp then
                 -- Warn about invalid option
                 vim.notify(
-                    string.format("Invalid option '%s' for type is doesn't exists is Lsp", value),
+                    string.format("Invalid option '%s' for type doesn't exist in LSP", value),
                     vim.log.levels.WARN
                 )
                 goto continue
             end
-            -- print("Type:" .. value .. "lsp:" .. symbol_kind_lsp)
             value = symbol_kind_lsp
         else
             if type(value) ~= "number" then
@@ -84,20 +81,17 @@ local function to_lsp_symbol_kinds_mask(symbol_kinds)
                 goto continue
             end
         end
-        -- print("type:" .. type(name))
         result = bit.bor(result, bit.lshift(1, value - 1))
-        --TODO check if value is valid
-        -- print(name .. " " ..  bit.lshift(1, name - 1))
         ::continue::
 
 
 
     end
-    utils.iter_parts(symbol_kinds, function (i,v)
-        parse_value(v)
-    end,function (k,v)
-            parse_value(k)
-        end)
+    utils.iter_parts(symbol_kinds, function(index, value)
+        parse_value(value)
+    end, function(kind_name, kind_value)
+        parse_value(kind_name)
+    end)
     return result
 end
 
@@ -146,7 +140,6 @@ local function resolve_options(options, watcher)
                         adorners_opts[kind_adorner_opts] = kinds_ad_options
                     end
                     table.insert(kinds_ad_options.kinds, kind)
-                    -- print(string.format("adorner: %s insert type: %s", kind_adorner_opts.type, kind))
                 end
             end
         end
@@ -164,7 +157,6 @@ local function resolve_options(options, watcher)
             end
             if options_for_filetype.kinds then
                 kind_options = vim.tbl_extend("force", kind_options, options_for_filetype.kinds)
-                -- print("filetype:" .. vim.inspect(kind_options))
             end
         else
 
@@ -311,7 +303,7 @@ function M.disable()
     if enabled == false then
         return
     end
-    for _, watcher in ipairs(watcher_per_buffer) do
+    for _, watcher in pairs(watcher_per_buffer) do
         watcher:destroy()
     end
     watcher_per_buffer = {}
@@ -330,7 +322,7 @@ function M.toggle()
 end
 
 function M.update()
-    if M.enable then
+    if enabled then
         -- Don't delete all, just refresh
         local bufnr = vim.api.nvim_get_current_buf()
         local clients = vim.lsp.get_clients({ bufnr = bufnr })
@@ -352,7 +344,6 @@ end
 
 ---@param user_opts ReferencerConfig
 function M.setup(user_opts)
-    -- require("referencer.benhcmark")
     utils.clear_client_cache()
     config.setup(user_opts)
     opts = config.options

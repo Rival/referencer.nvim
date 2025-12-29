@@ -348,7 +348,8 @@ function BufferLspWatcher:actualize_all_lsps(buffer_changed_run, append)
 
     -- Cancel existing requests (user made new changes before previous request completed)
     if self.pending_requests and self.pending_requests.cancel_fn then
-        self.pending_requests.cancel_fn()
+        pcall(self.pending_requests.cancel_fn)
+        self.pending_requests = nil
     end
 
     local pending_requests = {}
@@ -378,6 +379,11 @@ function BufferLspWatcher:actualize_all_lsps(buffer_changed_run, append)
             -- Update last changedtick to prevent duplicate requests
             self.last_update = start_changedtick
             vim.schedule(function()
+                -- Ensure buffer is still valid after async operation
+                if not vim.api.nvim_buf_is_valid(self.buffer_id) then
+                    logger.debug("Buffer %d deleted before actualization completion", self.buffer_id)
+                    return
+                end
                 logger.info("=== Actualize end, changetick: %d ===", start_changedtick)
                 self.symbols_watcher:finish_lsp_actualization()
             end)

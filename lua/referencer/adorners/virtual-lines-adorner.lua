@@ -1,218 +1,201 @@
-local config = require("referencer.config")
-local utils = require("referencer.utils")
+-- ============================================================================
+-- Imports
+-- ============================================================================
+
 local SymbolAdorner = require("referencer.adorners.symbol-adorner")
 local SymbolsWatcher = require("referencer.symbols-watcher.symbols-watcher")
 local SymbolInfo = require("referencer.symbols-watcher.symbol-info")
 local LineInfo = require("referencer.symbols-watcher.line-info")
+local AnimationManager = require("referencer.animation-manager")
 local logger = require("referencer.logger").for_module("virtual_lines_adorner")
+local formatters = require("referencer.adorners.virtual-lines-formatters")
 
+-- ============================================================================
+-- Type Definitions
+-- ============================================================================
 
 ---@class VirtualLineAdornerOptions : SymbolAdornerOpions
----@field align_first any
----@field align_following any
----@field above boolean
+---@field above boolean Position virtual lines above (true) or below (false) code
+---@field formatter? string|VirtualLineFormatter|GetVirtualTextBySymbol|VirtualLineFormatterConfig Formatter: string (simple) or config table (advanced)
+---@field align_first? any DEPRECATED: use formatter = {type="first_and_following", first=...}
+---@field align_following? any DEPRECATED: use formatter = {type="first_and_following", following=...}
+
+---@class VirtualLineFormatterConfig
+---@field type "single"|"first_and_following"|"position"|"selector" Formatter strategy type
+---@field formatter? string|VirtualLineFormatter|GetVirtualTextBySymbol For type="single": the formatter to use
+---@field first? string|VirtualLineFormatter|GetVirtualTextBySymbol For type="first_and_following": first symbol formatter
+---@field following? string|VirtualLineFormatter|GetVirtualTextBySymbol For type="first_and_following": 2nd+ symbols formatter
+---@field default? string|VirtualLineFormatter|GetVirtualTextBySymbol For type="position": fallback formatter
+---@field [integer]? string|VirtualLineFormatter|GetVirtualTextBySymbol For type="position": position-specific formatters (1-based)
+---@field selector? FormatterSelectorFunc For type="selector": custom selection function
+
+---@alias FormatterSelectorFunc fun(symbol: SymbolInfo, index: integer, line_info: LineInfo): string|VirtualLineFormatter|GetVirtualTextBySymbol
 
 ---@class VirtualLinesAdorner : SymbolAdorner
----@field first_symbol_formatter any
----@field following_symbol_formatter any
+---@field formatter VirtualLineFormatter Formatter for rendering virtual text (can be SingleFormatter, FirstAndOthersFormatter, PositionFormatter, or SelectorFormatter)
 local VirtualLinesAdorner = setmetatable({}, {__index = SymbolAdorner})
 VirtualLinesAdorner.__index = VirtualLinesAdorner
 
 ---@class VirtualLineData
----@field mark_id integer mark_id for virtual line
----@field new_line integer new_line new line after taking data from buffer, -1 if not changed
----@field text string cached text
----@field needs_update boolean cached text
+---@field mark_id integer|nil Extmark ID for the virtual line (nil if not yet created)
+---@field new_line integer|nil New line after taking data from buffer, -1 if not changed (currently unused)
+---@field text string Cached line text from buffer
+---@field needs_update boolean Flag indicating line needs re-rendering
+---@field animation_time number|nil Accumulated animation time in ms (added dynamically during animations)
+---@field animation_last_update number|nil Last animation update timestamp from vim.loop.now() (added dynamically)
+---@field animation_cleanup function|nil Cleanup function to unregister animation callback
+---@field virt_text_chunks table|nil Cached array of virtual text chunks (reused across renders)
 
+---@class VirtualLinesSymbolAdornerData
+---@field symbol_start_col integer Buffer column where symbol starts
+---@field visual_end_col integer Visual column where symbol ends
+---@field text_current_col integer Current column position in virtual line
+---@field text_line_spacing table|nil Spacing chunk: {spaces_string, "Normal"} or nil
+---@field text_line table Virtual text chunk: {text, highlight_group}
+---@field text_target_col integer Target column where this symbol's text should appear
+---@field format_func function Cached formatter function (from FormatterBase:set_symbol_state)
+---@field is_animated boolean Whether the cached formatter expects animation time parameter
+---@field text_chunks table|nil Cached chunks array: {{text, hl}, ...}
+---@field width_cache integer|nil Cached total display width for change detection
 
--- Built-in alignment functions for virtual lines
-VirtualLinesAdorner.aligners = {}
+-- Type aliases for formatter functions
+---@alias GetVirtualTextBySymbol fun(adorner:VirtualLinesAdorner, line:integer, span_col:integer, span_end_col:integer, symbol_col:integer, symbol_end_col:integer, symbol_info: SymbolInfo, adorner_symbol_data: VirtualLinesSymbolAdornerData):table|nil, integer, integer
+---@alias GetVirtualTextBySymbolAnimated fun(adorner:VirtualLinesAdorner, line:integer, span_col:integer, span_end_col:integer, symbol_col:integer, symbol_end_col:integer, symbol_info:SymbolInfo, adorner_symbol_data:VirtualLinesSymbolAdornerData, time:number):table|nil, integer, integer
+-- Returns: ({{text, hl}, {text2, hl2}, ...}, target_col, total_width) or (nil, col, 0) to skip symbol
+---@alias ShouldAnimateVirtualLineFunc fun(symbol:SymbolInfo, adorner_data:VirtualLinesSymbolAdornerData):boolean
 
+-- ============================================================================
+-- Formatter Presets
+-- ============================================================================
 
----@alias GetVirtualTextBySymbol fun(adorner:InlineAdorner, line:integer, span_col:integer,span_end_col:integer, symbol_col:integer,symbol_end_col:integer, symbol_info: SymbolInfo, adorner_symbol_data: any):any[]|nil, integer
+-- Formatter presets with animation support (populated from presets file at end of module)
+VirtualLinesAdorner.formatters = {}
 
+-- Note: Alignment formatters (most_left, left, center, right) are defined in virtual-lines-adorner-presets.lua
 
----@type GetVirtualTextBySymbol
-function VirtualLinesAdorner.aligners.most_left(adorner, line, span_col, span_end_col, symbol_col, symbol_end_col, symbol_info)
-    local refs_count = #SymbolInfo.get_symbol_data(symbol_info).refs - 1
-    -- Check if symbol needs validation (validated_tick == 0)
-    if SymbolInfo.get_validated_tick(symbol_info) == 0 then
-        return "?", span_col
-    end
-    local text = string.format(config.options.format or "→ %d", refs_count)
-    -- span_col is already set correctly by the caller:
-    -- - for first symbol: line's first non-whitespace column
-    -- - for following symbols: span_end_col of previous symbol + 1
-    return text, span_col
-end
+-- ============================================================================
+-- Helper Functions
+-- ============================================================================
 
----@type GetVirtualTextBySymbol
-function VirtualLinesAdorner.aligners.left(adorner, line, span_col, span_end_col, symbol_col, symbol_end_col, symbol_info)
-    local refs_count = #SymbolInfo.get_symbol_data(symbol_info).refs - 1
-    local text = string.format(config.options.format or "→ %d", refs_count)
-    return text, symbol_col
-end
-
----@type GetVirtualTextBySymbol
-function VirtualLinesAdorner.aligners.center(adorner, line, span_col, span_end_col, symbol_col, symbol_end_col, symbol_info)
-    local refs_count = #SymbolInfo.get_symbol_data(symbol_info).refs - 1
-    local text = string.format(config.options.format or "→ %d", refs_count)
-    local symbol_width = symbol_end_col - symbol_col
-    local text_width = #text
-    local center_offset = math.floor((symbol_width - text_width) / 2)
-    local col = math.max(span_col, symbol_col + center_offset)
-    return text, col
-end
-
----@type GetVirtualTextBySymbol
-function VirtualLinesAdorner.aligners.right(adorner, line, span_col, span_end_col, symbol_col, symbol_end_col, symbol_info)
-    local refs_count = #SymbolInfo.get_symbol_data(symbol_info).refs - 1
-    local text = string.format(config.options.format or "→ %d", refs_count)
-    local text_width = #text
-    local col = math.max(span_col, symbol_end_col - text_width)
-    return text, col
-end
-
+--- Update virtual line display for a specific line
 ---@param adorner VirtualLinesAdorner
+---@param line_info LineInfo
 ---@param line_data VirtualLineData
+---@param line integer
 local function update_virtual_line_for_line(adorner, line_info, line_data, line)
-    -- Sort symbols by column
-    table.sort(line_info.symbols, function(a, b) return a[SymbolInfo.CORE].col < b[SymbolInfo.CORE].col end)
-
     if  line_data.needs_update then
         line_data.text = adorner.watcher:get_line_text(line)
     end
     -- Get line text for calculating positions
     local indent = line_data.text:match("^%s*") or ""
-    local line_start_col = #indent
+    local line_start_col = vim.fn.strdisplaywidth(indent)
 
-    -- Helper function to find first non-whitespace after a position
-    local function find_next_nonwhitespace(text, start_pos)
-        -- start_pos points to the first char after symbol name (e.g., the semicolon)
-        -- We want to find non-whitespace AFTER that position
-        -- Buffer is 0-indexed, Lua strings are 1-indexed
-        -- So buffer position N = Lua string index N+1
-        -- To start AFTER position start_pos, we need start_pos + 1 (buffer) = start_pos + 2 (Lua)
-        local substr = text:sub(start_pos + 2)
-        local ws_match = substr:match("^%s*")
-        local offset = ws_match and #ws_match or 0
-        -- We're looking at start_pos+1 in the buffer, then skipping whitespace
-        return start_pos + 1 + offset
+    -- Reuse virt_text_chunks array to avoid allocations
+    if not line_data.virt_text_chunks then
+        line_data.virt_text_chunks = {}
     end
-
-
-    local last_symbol_end_col = 0  -- Track where the last symbol ended in the buffer
-    local virt_text_chunks = {}
-    local current_col = 0  -- Track our position in building the virtual line
+    local virt_text_chunks = line_data.virt_text_chunks
+    local chunk_idx = 1  -- Track position for index assignment
+    local text_last_col = 0  -- Track our position in building the virtual line
 
     -- Build virtual line with text at specific columns
 
     local line_changed = false
     for i, symbol in ipairs(line_info.symbols) do
+        --line_info may contain symbols for other adorners
+        if not adorner:is_symbol_supported(symbol) then goto continue end
 
-        -- Calculate symbol end column
-        -- Note: LSP might give us qualified names like "M.aligners.func" 
-        -- but only "func" appears in the buffer at the position
-        -- So we need to extract the actual text from the buffer
-        -- local symbol_col = symbol_info.col
-
-        -- Extract actual text at the position to get real length
-        -- Look for word boundaries (space, punctuation, etc.)
-        local symbol_data = SymbolInfo.get_symbol_data(symbol)
-
-
-
-        local col = symbol[SymbolInfo.CORE].col
+        local symbol_col = SymbolInfo.get_col(symbol)
+        local symbol_end_col = SymbolInfo.get_end_col(symbol)
         local adorner_data = SymbolInfo.get_adorner_data(symbol, adorner)
+        ---@cast adorner_data VirtualLinesSymbolAdornerData
 
-        local symbol_name = symbol_data.sym.name or ""
-        local after_col_text = line_data.text:sub(col + 1)  -- +1 for Lua indexing
-        local actual_symbol = after_col_text:match("^([%w_]+)")
-        local actual_length = actual_symbol and #actual_symbol or #symbol_name
-        local visual_end_col = col + actual_length
-        local symbol_start_col = col
-        local symbol_end_col = visual_end_col
-        adorner_data.visual_end_col = visual_end_col
-        adorner_data.symbol_start_col = symbol_start_col
-
-        if not adorner:is_type_supported(symbol_data.kind) then
-            -- Update where this symbol ended in the buffer for next cycle
-            last_symbol_end_col = symbol_end_col
-            goto continue
+        -- Verify index is up-to-date and re-cache formatter if it changed
+        local current_index = SymbolInfo.get_index(symbol)
+        if current_index ~= i then
+            -- Index changed (symbol moved positions on line) - update it and re-cache formatter
+            SymbolInfo.set_index(symbol, i)
+            adorner.formatter:set_symbol_index(adorner_data, symbol, i)
         end
 
+        adorner_data.symbol_start_col = symbol_col
+        adorner_data.visual_end_col = symbol_end_col
+
         -- Calculate available space for this symbol
-        local span_start_col
+        local span_start_col-- it is start col of available space
         if i == 1 then
             span_start_col = line_start_col  -- First symbol: start at first non-whitespace
         else
-            -- Following symbols: find first non-whitespace after previous symbol ended
-            local calculated_start = find_next_nonwhitespace(line_data.text, last_symbol_end_col)
-            -- However, if the actual symbol starts BEFORE our calculated position
-            -- (can happen when LSP gives qualified names like "M.aligners.func" but only "func" is in buffer),
-            -- use the actual symbol position instead
-            span_start_col = math.min(calculated_start, symbol_start_col)
+            span_start_col = text_last_col
         end
 
-        local span_end_col
+        local span_end_col-- it is end col of available space
         if i < #line_info.symbols then
-            span_end_col = SymbolInfo.get_adorner_data(line_info.symbols[i + 1], adorner).visual_start_col
+            -- Use next symbol's column position (may overlap during edits before LSP updates)
+            local next_symbol_col = line_info.symbols[i + 1][SymbolInfo.CORE].col - 1
+            -- Ensure span doesn't end before current symbol (prevents invalid geometry during dry runs)
+            span_end_col = math.max(next_symbol_col, symbol_end_col + 1)
         else
             -- Last symbol: give it space until reasonable line width
             span_end_col = math.max(symbol_end_col + 20, 120)
         end
 
-        -- Call appropriate drawer
-        local drawer = i == 1 and adorner.first_symbol_formatter or adorner.following_symbol_formatter
-        local text, target_col = drawer(adorner, line, span_start_col, span_end_col, symbol_start_col, symbol_end_col, symbol)
+        -- Format text using cached formatter function (cached by OnSymbolDataUpdated event)
+        local chunks, target_col, total_width = adorner.formatter:format_symbol(adorner, line, span_start_col, span_end_col,
+                                                                                 symbol_col, symbol_end_col, symbol,
+                                                                                 adorner_data, line_data)
 
-        if
-true
-            -- adorner_data.text ~= text or
-            -- target_col ~= adorner_data.text_target_col or
-            -- adorner_data.text_current_col ~= current_col 
+        if not chunks then goto continue end  -- Formatter returned nil
 
-        then
-            -- print(string.format("changed %s(si:%s) current_col: %s(si:%s) target_col: %d(si:%s)",
-            --     text, tostring(symbol_info.text),
-            --     current_col, tostring(symbol_info.text_current_col),
-            --     target_col, tostring(symbol_info.text_target_col)
-            -- ))
-            -- text was updated
+        -- Fast path: Check if formatter returned cached chunks (reference equality)
+        -- Formatters can signal "reuse" by returning adorner_data.text_chunks directly
+        local reuse_cached = (chunks == adorner_data.text_chunks)
+
+        if not reuse_cached then
             line_changed = true
 
-            adorner_data.text = text
-            adorner_data.text_current_col = current_col
+            -- Update caches
+            adorner_data.text_chunks = chunks
+            adorner_data.width_cache = total_width
+            adorner_data.text_current_col = text_last_col
+            adorner_data.text_target_col = target_col
 
-            -- Add spacing from current position to symbol position
-            local spacing = math.max(0, target_col - current_col)
+            -- Update spacing table IN-PLACE
+            local spacing = math.max(0, target_col - text_last_col)
             if spacing > 0 then
-                current_col = current_col + spacing
-                adorner_data.text_line_spacing = { string.rep(" ", spacing), "Normal" }
+                text_last_col = text_last_col + spacing
+                if not adorner_data.text_line_spacing then
+                    adorner_data.text_line_spacing = { string.rep(" ", spacing), "Normal" }
+                else
+                    ---@diagnostic disable-next-line: assign-type-mismatch
+                    adorner_data.text_line_spacing[1] = string.rep(" ", spacing)
+                end
             else
                 adorner_data.text_line_spacing = nil
             end
-            adorner_data.text_line = { text, adorner.hl_group }
-            -- print(vim.inspect(adorner_data.text_line))
-            adorner_data.text_target_col = target_col
-        else
-
         end
-        local spacing = math.max(0, target_col - current_col)
+
+        -- Build virt_text_chunks (use index assignment for reuse)
         if adorner_data.text_line_spacing then
-            table.insert(virt_text_chunks, adorner_data.text_line_spacing)
-            current_col = current_col + spacing
+            virt_text_chunks[chunk_idx] = adorner_data.text_line_spacing
+            chunk_idx = chunk_idx + 1
         end
-        -- Add the symbol text
-        table.insert(virt_text_chunks, adorner_data.text_line)
-        current_col = current_col + #text
+        -- Add all cached chunks
+        for _, chunk in ipairs(adorner_data.text_chunks) do
+            virt_text_chunks[chunk_idx] = chunk
+            chunk_idx = chunk_idx + 1
+        end
+        text_last_col = text_last_col + adorner_data.width_cache
 
-        -- Update where this symbol ended in the buffer for next cycle
-        last_symbol_end_col = symbol_end_col
         ::continue::
     end
 
-    if current_col == 0 then
+    -- Clear excess elements from previous renders
+    for i = chunk_idx, #virt_text_chunks do
+        virt_text_chunks[i] = nil
+    end
+
+    if text_last_col == 0 then
         --all symbols become not drawable (maybe they changed their type), we better delete mark
         if line_data.mark_id and line_data.mark_id > 0 then
             logger.debug("Virtual line destroyed - no symbols to draw: line=%d mark=%d", line, line_data.mark_id)
@@ -242,6 +225,10 @@ true
     end
 end
 
+-- ============================================================================
+-- VirtualLinesAdorner Main Class
+-- ============================================================================
+
 ---@param  watcher SymbolsWatcher
 function VirtualLinesAdorner:new(watcher)
     -- Создаем через родительский конструктор
@@ -255,23 +242,93 @@ function VirtualLinesAdorner:init(opts, index, kinds_mask)
     self.hl_group = require("referencer.config").get_hl_group()
     self.above = opts.above
 
-
-    self.first_symbol_formatter = utils.resolve_callback_from_options(opts.align_first, VirtualLinesAdorner.aligners,"most_left")
-    self.following_symbol_formatter = utils.resolve_callback_from_options(opts.align_following, VirtualLinesAdorner.aligners,"most_left")
-
+    -- Create formatter using factory from virtual-lines-formatters module
+    self.formatter = formatters.create_formatter(opts, VirtualLinesAdorner.formatters)
 
     self:Enable()
 end
 
+--- Manage per-line animation callback registration
+--- Registers callback when any symbol on line is animated, removes when none are
+---@param line_info LineInfo
+---@param line_data VirtualLineData
+---@param line integer Line number
+local function manage_line_animation(self, line_info, line_data, line)
+    -- ========================================================================
+    -- PHASE 1: Detection - Check if this line needs animation
+    -- ========================================================================
+
+    -- Scan all symbols on this line to determine if any require animation
+    local should_animate_line = false
+    local interval = 150  -- Default animation update interval (ms)
+
+    for _, symbol in ipairs(line_info.symbols) do
+        -- Skip symbols not handled by this adorner (e.g., wrong kind/type)
+        if not self:is_symbol_supported(symbol) then goto continue_symbol end
+
+        local adorner_symbol_data = SymbolInfo.get_adorner_data(symbol, self)
+        ---@cast adorner_symbol_data VirtualLinesSymbolAdornerData
+
+        -- Check if this symbol's formatter is animated
+        if adorner_symbol_data.is_animated then
+            should_animate_line = true
+
+            -- Extract animation interval from the formatter configuration
+            -- (only the first animated symbol's interval is used for the line)
+            local symbol_index = SymbolInfo.get_index(symbol)
+            local delegate = self.formatter:get_delegate(symbol_index)
+            interval = delegate.animation_interval or 150
+            break  -- Found one - that's enough to animate the entire line
+        end
+
+        ::continue_symbol::
+    end
+
+    -- ========================================================================
+    -- PHASE 2: State Transition - Register or unregister callback as needed
+    -- ========================================================================
+
+    -- Check current callback state (cleanup function exists = callback registered)
+    local has_callback = line_data.animation_cleanup ~= nil
+
+    -- STATE: Need animation but no callback → START animation
+    if should_animate_line and not has_callback then
+        -- Register a callback that fires on each animation frame
+        line_data.animation_cleanup = AnimationManager.add_animated_callback(function(now)
+            local last_update = line_data.animation_last_update or 0
+
+            -- Throttle updates to match the configured interval (e.g., 150ms)
+            if now - last_update >= interval then
+                -- Advance animation time (used by formatters for effects)
+                line_data.animation_time = (line_data.animation_time or 0) + interval
+                line_data.animation_last_update = now
+                line_data.needs_update = true
+
+                -- Trigger re-render with updated animation time
+                update_virtual_line_for_line(self, line_info, line_data, line)
+            end
+        end)
+
+    -- STATE: Don't need animation but have callback → STOP animation
+    elseif not should_animate_line and has_callback then
+        -- Unregister the animation callback (line_data.animation_cleanup is the cleanup function)
+        line_data.animation_cleanup()
+
+        -- Clear all animation state fields
+        line_data.animation_cleanup = nil
+        line_data.animation_time = nil
+        line_data.animation_last_update = nil
+        line_data.needs_update = true
+
+        -- Final render to show static (non-animated) state
+        update_virtual_line_for_line(self, line_info, line_data, line)
+    end
+
+    -- STATE: Need animation and have callback → no action (already animating)
+    -- STATE: Don't need animation and no callback → no action (already static)
+end
 
 function VirtualLinesAdorner:Enable()
-    -- self:AddUnsubHook(self.watcher.OnLineCreated:subscribe(function (args)
-    --     ---@cast args LineEventArgs
-    --     local adorner_data = LineInfo.get_adorner_data(args.line_info, self)
-    --     -- adorner_data.mark_id = -1
-    --     -- LineInfo.needs_update(args.line_info)
-    -- end))
-
     self:AddUnsubHook(self.watcher.OnSymbolMarkChanged:subscribe(function (symbol)
 
         if (self.watcher:is_dry() or self.watcher.is_stale) and
@@ -279,22 +336,45 @@ function VirtualLinesAdorner:Enable()
         then
             local line_info = self.watcher:get_line_info_for_symbol(symbol)
             local line_data = LineInfo.get_or_create_adorner_data(line_info, self)
+            ---@cast line_data VirtualLineData
             line_data.needs_update = true
+
+            -- Update formatter state when symbol mark changes (validated_tick may have changed)
+            local adorner_data = SymbolInfo.get_adorner_data(symbol, self)
+            self.formatter:set_symbol_state(adorner_data, symbol)
+
+            -- Manage animation callback registration based on symbol animation states
+            local line = line_info[LineInfo.CORE].line
+            manage_line_animation(self, line_info, line_data, line)
+
             logger.debug("Virtual line needs update: line=%d symbol mark changed", line_info[LineInfo.CORE].line)
         end
     end))
-    
+
     ---@param args SymbolDataChangedEventArgs
     self:AddUnsubHook(self.watcher.OnSymbolDataUpdated:subscribe(function (args)
-        -- NOTE: new symbols don't have line, we they will get it later
-        if args.status ~= SymbolsWatcher.SymbolStatus.New and self:is_symbol_supported(args.symbol) then
-            local line_info = self.watcher:get_line_info_for_symbol(args.symbol)
-            local line_data = LineInfo.get_or_create_adorner_data(line_info, self)
-            line_data.needs_update = true
-            logger.debug("Virtual line needs update: line=%d symbol data updated", line_info[LineInfo.CORE].line)
+        if self:is_symbol_supported(args.symbol) then
+            -- Always update cached formatter state (even for new symbols)
+            local adorner_data = SymbolInfo.get_adorner_data(args.symbol, self)
+            self.formatter:set_symbol_state(adorner_data, args.symbol)
+
+            -- Only update line data if symbol has been assigned a line (not New status)
+            -- NOTE: new symbols don't have line, they will get it later via OnSymbolLineChanged
+            if args.status ~= SymbolsWatcher.SymbolStatus.New then
+                local line_info = self.watcher:get_line_info_for_symbol(args.symbol)
+                local line_data = LineInfo.get_or_create_adorner_data(line_info, self)
+                ---@cast line_data VirtualLineData
+                line_data.needs_update = true
+
+                -- Manage animation callback registration based on symbol animation states
+                local line = line_info[LineInfo.CORE].line
+                manage_line_animation(self, line_info, line_data, line)
+
+                logger.debug("Virtual line needs update: line=%d symbol data updated", line_info[LineInfo.CORE].line)
+            end
         end
     end))
-    
+
     ---@param args LineSymbolsChangedEventArgs
     self:AddUnsubHook(self.watcher.OnSymbolLineChanged:subscribe(function (args)
         if
@@ -303,49 +383,76 @@ function VirtualLinesAdorner:Enable()
             self:is_symbol_supported(args.symbol)
         then
             local line_data = LineInfo.get_or_create_adorner_data(args.line_info, self)
+            ---@cast line_data VirtualLineData
             line_data.needs_update = true
+
+            -- Manage animation for new line
+            local line = args.line_info[LineInfo.CORE].line
+            manage_line_animation(self, args.line_info, line_data, line)
+
             if args.old_line then
                 local old_line_data = LineInfo.get_or_create_adorner_data(args.old_line, self)
+                ---@cast old_line_data VirtualLineData
                 old_line_data.needs_update = true
+
+                -- Manage animation for old line (may need to stop if no more animated symbols)
+                local old_line_num = args.old_line[LineInfo.CORE].line
+                manage_line_animation(self, args.old_line, old_line_data, old_line_num)
             end
             logger.debug("Virtual line needs update: line=%d symbol line changed", args.line_info[LineInfo.CORE].line)
         end
     end))
-    
+
     ---@param symbol SymbolInfo
     self:AddUnsubHook(self.watcher.OnSymbolMarkDestroyed:subscribe(function (symbol)
         if  self:is_symbol_supported(symbol) then
             local line_info = self.watcher:get_line_info_for_symbol(symbol)
             local line_data = LineInfo.get_or_create_adorner_data(line_info, self)
+            ---@cast line_data VirtualLineData
             line_data.needs_update = true
+
+            -- Manage animation (may need to stop if this was the last animated symbol)
+            local line = line_info[LineInfo.CORE].line
+            manage_line_animation(self, line_info, line_data, line)
+
             logger.debug("Virtual line needs update: line=%d symbol destroyed", line_info[LineInfo.CORE].line)
         end
     end))
-    
+
 
     self:AddUnsubHook(self.watcher.OnLineDestroyed:subscribe(function (args)
         local adorner_data = LineInfo.get_adorner_data(args.line_info, self)
+        ---@cast adorner_data VirtualLineData|nil
         if adorner_data and adorner_data.mark_id and adorner_data.mark_id > 0 then
             logger.debug("Virtual line destroyed: line=%d mark=%d is_dry=%s", args.line, adorner_data.mark_id, tostring(self.watcher:is_dry()))
             pcall(vim.api.nvim_buf_del_extmark, self.watcher.buffer, self.watcher.namespace, adorner_data.mark_id)
         end
     end))
 
-    self:AddUnsubHook(self.watcher.OnActualizeEnd:subscribe(function (args)
+    self:AddUnsubHook(self.watcher.OnActualizeEnd:subscribe(function (_args)
         for line, line_state in pairs(self.watcher.lines) do
-            -- Adorner is a pure renderer - if told to update, just do it
-            -- Viewport filtering happens upstream in buffer-watcher
-
             local adorner_data = LineInfo.get_adorner_data(line_state, self)
             if adorner_data and adorner_data.needs_update then
                 ---@cast adorner_data VirtualLineData
                 -- Always update virtual lines (remove 'changed' check since it's not set anywhere)
                 update_virtual_line_for_line(self, line_state, adorner_data, line)
             end
-
-            ::continue::
         end
     end))
+
+    -- Note: Animation is now managed per-line via manage_line_animation()
+    -- Callbacks are registered dynamically when lines have animated symbols
 end
+
+-- ============================================================================
+-- Module Exports
+-- ============================================================================
+
+-- Load formatter presets
+local create_formatters = require("referencer.adorners.virtual-lines-adorner-presets")
+VirtualLinesAdorner.formatters = create_formatters(formatters.VirtualLineFormatter)
+
+-- Export the formatter class for user customization
+VirtualLinesAdorner.Formatter = formatters.VirtualLineFormatter
 
 return VirtualLinesAdorner

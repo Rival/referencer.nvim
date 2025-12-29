@@ -25,7 +25,7 @@ function DebugHud.new(config)
         enabled = false,
         position = "top-right",
         width = 40,
-        height = 15,
+        height = 20,  -- Increased from 15 to accommodate animation stats
         update_interval = 200, -- Update every 200ms
         border = "rounded",
         style = "full", -- "minimal" or "full"
@@ -167,6 +167,11 @@ function DebugHud:get_stats()
     -- LSP clients
     stats.lsp_clients = self.watcher.lsp_clients and #self.watcher.lsp_clients or 0
 
+    -- Animation stats
+    local AnimationManager = require("referencer.animation-manager")
+    stats.anim_adorners = AnimationManager.get_adorner_count()
+    stats.anim_callbacks = AnimationManager.get_callback_count()
+
     -- Viewport info
     if sw.viewport and sw.viewport.enabled then
         stats.viewport_enabled = true
@@ -213,6 +218,11 @@ function DebugHud:render()
         table.insert(lines, "├────────────────────┤")
         table.insert(lines, string.format("│ Adorners: %d", stats.adorner_count))
         table.insert(lines, string.format("│ LSP Clients: %d", stats.lsp_clients))
+
+        -- Animation
+        table.insert(lines, "├────────────────────┤")
+        table.insert(lines, string.format("│ Anim Adorners: %d", stats.anim_adorners))
+        table.insert(lines, string.format("│ Anim Callbacks: %d", stats.anim_callbacks))
 
         -- Viewport (if enabled)
         if stats.viewport_enabled then

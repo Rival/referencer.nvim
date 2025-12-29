@@ -1,36 +1,35 @@
+-- ============================================================================
+-- Imports
+-- ============================================================================
+
 local config = require("referencer.config")
 local utils = require("referencer.utils")
 local SymbolAdorner = require("referencer.adorners.symbol-adorner")
 local SymbolsWatcher = require("referencer.symbols-watcher.symbols-watcher")
 local SymbolInfo = require("referencer.symbols-watcher.symbol-info")
+local FormatterBase = require("referencer.adorners.formatter-base")
+local AnimationManager = require("referencer.animation-manager")
 local logger = require("referencer.logger").for_module("inline_adorner")
 
+-- ============================================================================
+-- Type Definitions
+-- ============================================================================
+
+-- Type aliases for formatter functions
+---@alias GetVirtText fun(watcher:InlineAdorner, line:integer, col: integer, symbol_info: SymbolInfo, adorner_data: any):any[]|nil, integer
 ---@alias GetVirtTextAnimated fun(adorner:InlineAdorner, line:integer, col:integer, symbol_info:SymbolInfo, adorner_data:any, time:number):any[]|nil, integer
 ---@alias ShouldAnimateFunc fun(symbol:SymbolInfo, adorner_data:any):boolean
+---@alias SetVirtualTextFunc fun(adorner:InlineAdorner, watcher:SymbolsWatcher, line:integer, col: integer, symbol_data: SymbolData)
 
----@class InlineAdornerFormatter
+---@class InlineAdornerFormatter : FormatterBase
 ---@field text GetVirtText Normal state formatter
 ---@field text_animated GetVirtTextAnimated|nil Animated normal state (optional, falls back to text)
 ---@field waiting GetVirtText|nil Waiting/loading state (optional, falls back to text)
 ---@field waiting_animated GetVirtTextAnimated|nil Animated waiting state (optional)
 ---@field should_animate ShouldAnimateFunc|nil Condition to enable animation (default: always)
 ---@field animation_interval number|nil Milliseconds between animation frames (default: 150)
-local InlineAdornerFormatter = {}
+local InlineAdornerFormatter = setmetatable({}, { __index = FormatterBase })
 InlineAdornerFormatter.__index = InlineAdornerFormatter
-
----Create a new formatter descriptor
----@param opts {text: GetVirtText, text_animated?: GetVirtTextAnimated, waiting?: GetVirtText, waiting_animated?: GetVirtTextAnimated, should_animate?: ShouldAnimateFunc, animation_interval?: number}
----@return InlineAdornerFormatter
-function InlineAdornerFormatter:new(opts)
-    return setmetatable({
-        text = opts.text,
-        text_animated = opts.text_animated,
-        waiting = opts.waiting,
-        waiting_animated = opts.waiting_animated,
-        should_animate = opts.should_animate,
-        animation_interval = opts.animation_interval or 150,
-    }, self)
-end
 
 ---@class InlineAdornerOptions : SymbolAdornerOpions
 -- • align : position of virtual text. Possible values:
@@ -59,7 +58,6 @@ end
 ---@field hl_mode? string
 ---@field formatter? InlineAdornerFormatter | string Formatter (instance or name to look up)
 
-
 ---@class InlineAdorner : SymbolAdorner
 ---@field formatter InlineAdornerFormatter  -- Describes how this adorner renders symbols
 ---@field set_virtual_text SetVirtualTextFunc  -- Field in the class
@@ -67,67 +65,68 @@ end
 local InlineAdorner = setmetatable({}, {__index = SymbolAdorner})
 InlineAdorner.__index = InlineAdorner
 
-
 ---@class SymbolInfoRef : SymbolInfo
 ---@field old_refs integer  -- Field in the class
 
----@alias SetVirtualTextFunc fun(adorner:InlineAdorner, watcher:SymbolsWatcher, line:integer, col: integer, symbol_data: SymbolData)
----@alias GetVirtText fun(watcher:InlineAdorner, line:integer, col: integer, symbol_info: SymbolInfo, adorner_data: any):any[]|nil, integer
+-- ============================================================================
+-- InlineAdornerFormatter Class
+-- ============================================================================
 
--- Load formatter presets from separate file
--- Built-in formatters (each is an InlineAdornerFormatter instance)
+---Create a new formatter descriptor
+---@param opts {text: GetVirtText, text_animated?: GetVirtTextAnimated, waiting?: GetVirtText, waiting_animated?: GetVirtTextAnimated, should_animate?: ShouldAnimateFunc, animation_interval?: number}
+---@return InlineAdornerFormatter
+function InlineAdornerFormatter:new(opts)
+    local instance = FormatterBase.new(self, opts)
+    return setmetatable(instance, InlineAdornerFormatter)
+end
+
+--- Format inline virtual text for a symbol using cached formatter
+--- Assumes adorner_data.format_func was set by set_symbol_state()
+---@param adorner InlineAdorner
+---@param symbol SymbolInfo
+---@param adorner_data any Symbol-specific adorner data (must contain format_func and is_animated)
+---@return any[]|nil virt_text Virtual text chunks
+function InlineAdornerFormatter:format_symbol(adorner, symbol, adorner_data)
+    local SymbolInfo = require("referencer.symbols-watcher.symbol-info")
+    local mark_core = symbol[SymbolInfo.CORE]
+
+    -- Use cached formatter function (set by set_symbol_state)
+    local format_func = adorner_data.format_func
+    local is_animated = adorner_data.is_animated
+
+    -- Call with appropriate parameters based on whether it's animated
+    if is_animated then
+        local time = adorner_data.animation_time or 0
+        return format_func(adorner, mark_core.line, mark_core.col, symbol, adorner_data, time)
+    else
+        return format_func(adorner, mark_core.line, mark_core.col, symbol, adorner_data)
+    end
+end
+
+-- ============================================================================
+-- Formatter Presets
+-- ============================================================================
+
+-- Formatter presets initialization (populated from presets file at end of module)
 ---@type table<string, InlineAdornerFormatter>
 InlineAdorner.formatters = {}
 
----@param symbol SymbolInfo
+-- ============================================================================
+-- Helper Functions
+-- ============================================================================
+
+--- Update visual extmark for a symbol
 ---@param adorner InlineAdorner
+---@param _watcher SymbolsWatcher
+---@param symbol SymbolInfo
 ---@diagnostic disable-next-line: unused-local
 local function update_visual_ext_mark(adorner, _watcher, symbol)
     local mark_core = symbol[SymbolInfo.CORE]
     local adorner_data = SymbolInfo.get_adorner_data(symbol, adorner)
     local formatter = adorner.formatter
 
-    local virt_text
-
-    -- Determine state: waiting (not validated) vs normal
-    local is_waiting = SymbolInfo.get_validated_tick(symbol) == 0
-
-    -- Check if animations are enabled globally and for this formatter
-    local animations_enabled = config.options.animations_enabled ~= false
-    local should_animate = false
-
-    if animations_enabled then
-        if formatter.should_animate then
-            should_animate = formatter.should_animate(symbol, adorner_data)
-        else
-            -- Default: animate when waiting/not validated
-            should_animate = is_waiting
-        end
-    end
-
-    -- Select appropriate formatter function with fallback chain
-    local format_func
-    local time = adorner_data.animation_time or 0
-
-    if is_waiting then
-        if should_animate and formatter.waiting_animated then
-            format_func = function() return formatter.waiting_animated(adorner, mark_core.line, mark_core.col, symbol, adorner_data, time) end
-        elseif formatter.waiting then
-            format_func = function() return formatter.waiting(adorner, mark_core.line, mark_core.col, symbol, adorner_data) end
-        elseif should_animate and formatter.text_animated then
-            format_func = function() return formatter.text_animated(adorner, mark_core.line, mark_core.col, symbol, adorner_data, time) end
-        else
-            format_func = function() return formatter.text(adorner, mark_core.line, mark_core.col, symbol, adorner_data) end
-        end
-    else
-        if should_animate and formatter.text_animated then
-            format_func = function() return formatter.text_animated(adorner, mark_core.line, mark_core.col, symbol, adorner_data, time) end
-        else
-            format_func = function() return formatter.text(adorner, mark_core.line, mark_core.col, symbol, adorner_data) end
-        end
-    end
-
-    virt_text = format_func()
+    -- Format virtual text using cached formatter function (cached by OnSymbolDataUpdated event)
+    local virt_text = formatter:format_symbol(adorner, symbol, adorner_data)
 
     if not virt_text then return end
 
@@ -174,11 +173,53 @@ local function update_visual_ext_mark(adorner, _watcher, symbol)
     end
 end
 
+--- Manage per-symbol animation callback registration
+--- Registers callback when is_animated = true, removes when false
+---@param self InlineAdorner
+---@param symbol SymbolInfo
+---@param adorner_data table Symbol's adorner data
+local function manage_symbol_animation(self, symbol, adorner_data)
+    local is_animated = adorner_data.is_animated
+    local has_callback = adorner_data.animation_cleanup ~= nil
+
+    if is_animated and not has_callback then
+        -- Start animation: register callback
+        local interval = self.formatter.animation_interval or 150
+
+        adorner_data.animation_cleanup = AnimationManager.add_animated_callback(function(now)
+            local last_update = adorner_data.animation_last_update or 0
+
+            if now - last_update >= interval then
+                -- Increment animation time
+                adorner_data.animation_time = (adorner_data.animation_time or 0) + interval
+                adorner_data.animation_last_update = now
+
+                -- Update extmark
+                update_visual_ext_mark(self, self.watcher, symbol)
+            end
+        end)
+
+    elseif not is_animated and has_callback then
+        -- Stop animation: unregister callback
+        adorner_data.animation_cleanup()
+        adorner_data.animation_cleanup = nil
+        adorner_data.animation_time = nil
+        adorner_data.animation_last_update = nil
+
+        -- Force update to show normal formatter
+        update_visual_ext_mark(self, self.watcher, symbol)
+    end
+end
+
+-- ============================================================================
+-- InlineAdorner Main Class
+-- ============================================================================
 
 ---@param  watcher SymbolsWatcher
 function InlineAdorner:new(watcher)
     return SymbolAdorner.new(self, watcher)
 end
+
 ---@param  opts InlineAdornerOptions
 function InlineAdorner:init(opts, index, kinds_mask)
     SymbolAdorner.init(self, opts, index,kinds_mask)
@@ -239,7 +280,7 @@ end
 
 ---@param line integer
 ---@param col integer
-function SymbolAdorner:inspect_position(line, col)
+function InlineAdorner:inspect_position(line, col)
     local line_info = self.watcher.lines[line]
     if line_info then
         logger.debug("inspect_position: line=%d col=%d symbols_count=%d", line, col, #line_info.symbols)
@@ -258,68 +299,6 @@ function SymbolAdorner:inspect_position(line, col)
     end
 end
 
----Update animation time for symbols that need animation
-function InlineAdorner:update_animations()
-    local formatter = self.formatter
-
-    -- Skip if no animated formatters configured
-    if not formatter.text_animated and not formatter.waiting_animated then
-        return
-    end
-
-    -- Check if animations are globally enabled
-    if config.options.animations_enabled == false then
-        return
-    end
-
-    local now = vim.loop.now()
-    local needs_update = {}
-    local interval = formatter.animation_interval or 150
-
-    for _, line_info in pairs(self.watcher.lines) do
-        for _, symbol in ipairs(line_info.symbols) do
-            if not self:is_symbol_supported(symbol) then goto continue end
-
-            local adorner_data = SymbolInfo.get_adorner_data(symbol, self)
-
-            -- Determine if this symbol should animate
-            local should_animate = false
-            if formatter.should_animate then
-                should_animate = formatter.should_animate(symbol, adorner_data)
-            else
-                -- Default: animate when waiting/not validated
-                should_animate = SymbolInfo.get_validated_tick(symbol) == 0
-            end
-
-            if should_animate then
-                local last_update = adorner_data.animation_last_update or 0
-
-                if now - last_update >= interval then
-                    -- Increment animation time (ms since animation started)
-                    adorner_data.animation_time = (adorner_data.animation_time or 0) + interval
-                    adorner_data.animation_last_update = now
-                    table.insert(needs_update, symbol)
-                end
-            else
-                -- Not animating anymore, reset state
-                if adorner_data.animation_time ~= nil then
-                    adorner_data.animation_time = nil
-                    adorner_data.animation_last_update = nil
-                    -- Force update to show normal formatter
-                    table.insert(needs_update, symbol)
-                end
-            end
-
-            ::continue::
-        end
-    end
-
-    -- Update extmarks for symbols that changed
-    for _, symbol in ipairs(needs_update) do
-        update_visual_ext_mark(self, self.watcher, symbol)
-    end
-end
-
 function InlineAdorner:Enable()
     -- self.watcher.OnLineCreated:subscribe(function (args)
     -- end)
@@ -328,7 +307,28 @@ function InlineAdorner:Enable()
     ---@param args SymbolEventArgs
     self:AddUnsubHook(self.watcher.OnSymbolDataUpdated:subscribe(function (args)
         if self:is_symbol_supported(args.symbol) then
+            -- Update cached formatter based on new symbol state (waiting vs normal)
+            local adorner_data = SymbolInfo.get_adorner_data(args.symbol, self)
+            self.formatter:set_symbol_state(adorner_data, args.symbol)
+
+            -- Manage animation callback registration based on is_animated state
+            manage_symbol_animation(self, args.symbol, adorner_data)
+
             update_visual_ext_mark(self, self.watcher, args.symbol)
+        end
+    end))
+
+    ---@param symbol SymbolInfo
+    self:AddUnsubHook(self.watcher.OnSymbolMarkChanged:subscribe(function (symbol)
+        if self:is_symbol_supported(symbol) then
+            -- Update formatter state when symbol mark changes (validated_tick may have changed)
+            local adorner_data = SymbolInfo.get_adorner_data(symbol, self)
+            self.formatter:set_symbol_state(adorner_data, symbol)
+
+            -- Manage animation callback registration based on is_animated state
+            manage_symbol_animation(self, symbol, adorner_data)
+
+            update_visual_ext_mark(self, self.watcher, symbol)
         end
     end))
 
@@ -343,28 +343,12 @@ function InlineAdorner:Enable()
             self:destroy_mark(args)
     end))
 
-    -- Animation timer for loading states (runs every 50ms)
-    self.animation_timer = vim.loop.new_timer()
-    self.animation_timer:start(50, 50, vim.schedule_wrap(function()
-        self:update_animations()
-    end))
-
-    -- Clean up timer when adorner is disabled
-    self:AddUnsubHook(function()
-        if self.animation_timer then
-            self.animation_timer:stop()
-            self.animation_timer:close()
-            self.animation_timer = nil
-        end
-    end)
-
-    -- self.watcher.OnActualizeEnd:subscribe(function (args)
-    --
-    -- end)
+    -- Note: Animation is now managed per-symbol via manage_symbol_animation()
+    -- Callbacks are registered dynamically when symbols need animation
 end
 
 -- ============================================================================
--- LOAD FORMATTER PRESETS
+-- Module Exports
 -- ============================================================================
 
 -- Load formatter presets from separate file

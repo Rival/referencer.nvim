@@ -143,7 +143,7 @@ M.options = {
         enabled = false,              -- Default: disabled (toggle with :ReferencerDebugHud)
         position = "top-right",       -- Position on screen
         width = 40,                   -- Window width
-        height = 15,                  -- Window height
+        height = 20,                  -- Window height (increased to fit animation stats)
         update_interval = 200,        -- Update frequency in ms
         border = "rounded",           -- Border style
         row_offset = 0,               -- Offset from top/bottom (e.g., 3 to avoid notifications)
@@ -157,15 +157,15 @@ local hl_group_from_color = nil
 function M.setup(user_opts)
     M.options = vim.tbl_deep_extend("force", M.options, user_opts or {})
 
-    -- print(vim.inspect(M.options ))
-    -- Later, when you need integer conversion:
     local kind_values = {}
-    for name, config in pairs(user_opts.kinds) do
-        local kind_value = SymbolKind[name]
-        if kind_value then
-            kind_values[kind_value] = config
-        else
-            error("Unknown SymbolKind: " .. tostring(name))
+    if user_opts.kinds then
+        for name, config in pairs(user_opts.kinds) do
+            local kind_value = SymbolKind[name]
+            if kind_value then
+                kind_values[kind_value] = config
+            else
+                error("Unknown SymbolKind: " .. tostring(name))
+            end
         end
     end
 

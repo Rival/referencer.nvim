@@ -1,5 +1,6 @@
 local ffi = require("ffi")
 local logger = require("referencer.logger").for_module("line_info")
+local SymbolInfo = require("referencer.symbols-watcher.symbol-info")
 
 ffi.cdef[[
     typedef struct {
@@ -71,4 +72,51 @@ end
 function M.get_adorner_data(line, adorner)
     return line.adorner_data[adorner.index]
 end
+
+--- Update indices for all symbols on the line
+--- Called after adding/removing symbols to keep indices in sync
+---@param line_info LineInfo
+---@return nil
+function M.update_symbol_indices(line_info)
+    local symbols = line_info.symbols
+    for i = 1, #symbols do
+        SymbolInfo.set_index(symbols[i], i)
+    end
+end
+
+--- Add a single symbol maintaining sorted order by column
+--- Uses linear search - optimal for small symbol counts (typically < 10 per line)
+---@param line_info LineInfo
+---@param symbol SymbolInfo
+function M.add_symbol(line_info, symbol)
+    local SymbolInfo = require("referencer.symbols-watcher.symbol-info")
+    local col = symbol[SymbolInfo.CORE].col
+    local symbols = line_info.symbols
+
+    -- Linear search for insertion point (faster than binary for n < 10)
+    local insert_idx = #symbols + 1
+    for i = 1, #symbols do
+        if symbols[i][SymbolInfo.CORE].col > col then
+            insert_idx = i
+            break
+        end
+    end
+
+    table.insert(symbols, insert_idx, symbol)
+
+    -- Update indices for all symbols (insertion may have shifted indices)
+    M.update_symbol_indices(line_info)
+
+    line_info[M.CORE].update = true
+    logger.debug("Added symbol at col=%d (index=%d/%d)", col, insert_idx, #symbols)
+end
+
+--- Add multiple symbols (caller must sort afterwards for optimal O(n log n) performance)
+--- Use this for batch operations from merge_lines to avoid O(n²) complexity
+---@param line_info LineInfo
+---@param symbol SymbolInfo
+function M.add_symbol_unsorted(line_info, symbol)
+    table.insert(line_info.symbols, symbol)
+end
+
 return M

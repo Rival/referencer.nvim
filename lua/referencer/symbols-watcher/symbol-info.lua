@@ -9,9 +9,9 @@ ffi.cdef[[
         int32_t prev_line;
         int32_t prev_col;
         int32_t prev_end_col;
-        bool mark_updated;
         int32_t validated_tick;
-        int32_t _reserved;
+        int32_t index;
+        bool mark_updated;
     } MarkCore;
 ]]
 
@@ -27,7 +27,8 @@ ffi.cdef[[
 ---@field mark_updated boolean
 --- Buffer changetick when this symbol was last validated (0 = needs validation)
 ---@field validated_tick integer
----@field _reserved integer
+--- Symbol's position on its line (1-based index, 0 = not assigned)
+---@field index integer
 
 
 ---@type fun(): MarkCore 
@@ -66,7 +67,7 @@ function M.new(line, col, end_col, symbol_data)
     core.mark_id = -1
     core.mark_updated = false
     core.validated_tick = 0  -- 0 = needs validation
-    core._reserved = 0
+    core.index = 0  -- 0 = not assigned to line yet
 
     return {
         core,         -- [1] FFI struct
@@ -301,6 +302,21 @@ function M.get_validated_tick(mark)
     return mark[CORE].validated_tick
 end
 
+---Get symbol's position on its line
+---@param mark SymbolInfo
+---@return integer 1-based index on line (0 = not assigned)
+function M.get_index(mark)
+    return mark[CORE].index
+end
+
+---Set symbol's position on its line
+---@param mark SymbolInfo
+---@param index integer 1-based index on line
+---@return nil
+function M.set_index(mark, index)
+    mark[CORE].index = index
+end
+
 
 -- Lua object accessors
 ---@param mark SymbolInfo
@@ -364,4 +380,43 @@ function M.pos_to_string(mark)
     return string.format("[%d|%d-%d]", mark[CORE].line, mark[CORE].col, mark[CORE].end_col)
 end
 
+---@class SymbolInfoModule
+---@field CORE integer
+---@field SYMBOL_DATA integer
+---@field OPTS integer
+---@field ADORNER_DATA integer
+---@field new fun(line: integer, col: integer, end_col: integer, symbol_data: table): SymbolInfo
+---@field get_line fun(mark: SymbolInfo): integer
+---@field set_line fun(mark: SymbolInfo, line: integer)
+---@field get_col fun(mark: SymbolInfo): integer
+---@field set_col fun(mark: SymbolInfo, col: integer)
+---@field if_changed fun(mark: SymbolInfo): boolean
+---@field get_mark_id fun(mark: SymbolInfo): integer
+---@field set_mark_id fun(mark: SymbolInfo, id: integer)
+---@field get_end_col fun(mark: SymbolInfo): integer
+---@field set_end_col fun(mark: SymbolInfo, end_col: integer)
+---@field get_prev_end_col fun(mark: SymbolInfo): integer
+---@field is_mark_updated fun(mark: SymbolInfo): boolean
+---@field is_not_mark_updated fun(mark: SymbolInfo): boolean
+---@field set_mark_updated fun(mark: SymbolInfo, updated: boolean)
+---@field is_stale fun(mark: SymbolInfo, current_tick: integer, max_tick_delta?: integer): boolean
+---@field get_position fun(mark: SymbolInfo): integer, integer
+---@field set_position fun(mark: SymbolInfo, line: integer, col: integer, end_col: integer)
+---@field is_tick_size_changed fun(mark: SymbolInfo): boolean
+---@field is_bad_size fun(mark: SymbolInfo): boolean
+---@field get_position_from_data fun(data: SymbolData): integer, integer, integer
+---@field is_bad_size_for_data fun(data: SymbolData): boolean
+---@field set_needs_validation fun(mark: SymbolInfo)
+---@field set_validated_tick fun(mark: SymbolInfo, tick: integer)
+---@field get_validated_tick fun(mark: SymbolInfo): integer
+---@field get_index fun(mark: SymbolInfo): integer
+---@field set_index fun(mark: SymbolInfo, index: integer)
+---@field get_symbol_data fun(mark: SymbolInfo): SymbolData
+---@field set_symbol_data fun(mark: SymbolInfo, data: SymbolData, end_col: integer, validated_tick: integer)
+---@field get_opts fun(mark: SymbolInfo): table
+---@field get_adorner_data fun(mark: SymbolInfo, adorner: SymbolAdorner): table
+---@field id_pos_to_string fun(mark: SymbolInfo): string
+---@field pos_to_string fun(mark: SymbolInfo): string
+
+---@type SymbolInfoModule
 return M
